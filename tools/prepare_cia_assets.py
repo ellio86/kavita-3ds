@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resize sources for 3DS CIA packaging (banner 256x128, icon 48x48) and write silent WAV."""
+"""Prepare 3DS CIA assets: banner.png → 256×128, icon.png → 48×48 on white, silent WAV."""
 from __future__ import annotations
 
 import argparse
@@ -25,15 +25,26 @@ def write_silent_wav(path: Path, duration_s: float = 0.2) -> None:
         w.writeframes(b"\x00\x00" * nframes)
 
 
-def fit_banner(im: Image.Image) -> Image.Image:
+def normalize_banner(im: Image.Image) -> Image.Image:
+    """Ensure 256×128; if needed, scale to fit inside and center on a transparent canvas."""
     tw, th = 256, 128
+    im = im.convert("RGBA")
+    if im.size == (tw, th):
+        return im
     w, h = im.size
-    scale = max(tw / w, th / h)
+    scale = min(tw / w, th / h)
     nw, nh = int(w * scale + 0.5), int(h * scale + 0.5)
     resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
-    x = (nw - tw) // 2
-    y = (nh - th) // 2
-    return resized.crop((x, y, x + tw, y + th)).convert("RGB")
+    canvas = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    canvas.paste(resized, ((tw - nw) // 2, (th - nh) // 2), resized)
+    return canvas
+
+
+def icon48_on_white(icon: Image.Image) -> Image.Image:
+    icon = icon.convert("RGBA").resize((48, 48), Image.Resampling.LANCZOS)
+    base = Image.new("RGB", (48, 48), (255, 255, 255))
+    base.paste(icon, (0, 0), icon)
+    return base
 
 
 def main() -> None:
@@ -45,11 +56,11 @@ def main() -> None:
     bdir = args.build.resolve()
     bdir.mkdir(parents=True, exist_ok=True)
 
-    large = Image.open(root / "icon-large.png")
-    fit_banner(large).save(bdir / "cia_banner.png", "PNG")
+    banner = Image.open(root / "banner.png")
+    normalize_banner(banner).save(bdir / "cia_banner.png", "PNG")
 
     icon = Image.open(root / "icon.png")
-    icon.resize((48, 48), Image.Resampling.LANCZOS).save(bdir / "cia_icon48.png", "PNG")
+    icon48_on_white(icon).save(bdir / "cia_icon48.png", "PNG")
 
     write_silent_wav(bdir / "cia_silent.wav")
     print("Wrote", bdir / "cia_banner.png", bdir / "cia_icon48.png", bdir / "cia_silent.wav")

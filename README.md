@@ -34,7 +34,7 @@ This downloads `cJSON` and `stb_image` into the `libs/` directory.
 
 ### 4. Python (for icon / CIA assets)
 
-The first `make` runs `tools/prepare_cia_assets.py`, which resizes `icon.png` to 48×48 (for the `.smdh`), builds the CIA banner from `icon-large.png`, and writes a short silent audio clip for the banner. Install Python 3 and Pillow:
+The first `make` runs `tools/prepare_cia_assets.py`, which copies `banner.png` to the build tree as a 256×128 CIA banner (scaling to fit if needed), resizes `icon.png` to 48×48 on a white background (for the `.smdh`), and writes a short silent audio clip for the banner. Install Python 3 and Pillow:
 
 ```sh
 pip install Pillow

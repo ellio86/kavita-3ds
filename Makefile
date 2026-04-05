@@ -185,7 +185,7 @@ $(OUTPUT).elf: $(BUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile $(OUTPUT).elf
 
 #---------------------------------------------------------------------------------
-$(CIA_BANNER_PNG) $(CIA_ICON48_PNG) $(CIA_SILENT_WAV): icon.png icon-large.png tools/prepare_cia_assets.py
+$(CIA_BANNER_PNG) $(CIA_ICON48_PNG) $(CIA_SILENT_WAV): banner.png icon.png tools/prepare_cia_assets.py
 	@$(PYTHON) tools/prepare_cia_assets.py --root $(CURDIR) --build $(CURDIR)/$(BUILD)
 
 $(CIA_BANNER_BIN): $(CIA_BANNER_PNG) $(CIA_SILENT_WAV)
