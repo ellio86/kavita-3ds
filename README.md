@@ -77,7 +77,7 @@ Copy `kavita-3ds.3dsx` to `/3ds/kavita-3ds/kavita-3ds.3dsx` on your SD card, the
 Displayed on touchscreen. 
 
 In reader, press the A button to show the following controls: 
-- X: Adjust Zoom Level
+- D-Pad Up / Down: Zoom In / Out
 - Circle Pad (Whilst Zoomed): Pan Viewport
 - Start: Go To page
 - B: Back to Chapter List
