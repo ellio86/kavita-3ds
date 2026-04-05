@@ -1,6 +1,7 @@
 #include "screen_reader.h"
 #include "app.h"
 #include "kavita_api.h"
+#include "epub_reader.h"
 #include "image_loader.h"
 #include "http_client.h"
 #include "ui.h"
@@ -37,6 +38,11 @@
 #define BOT_LOG_W BOT_PHYS_H
 #define BOT_LOG_H BOT_PHYS_W
 
+/* EPUB body text scale (fixed; do not multiply reader_zoom). */
+#define READER_EPUB_TEXT_TOP       FONT_MED
+#define READER_EPUB_TEXT_BOT       FONT_SMALL
+#define READER_EPUB_LINE_GAP_SCALE 0.55f /* leading between baselines, × scale */
+
 #define ZOOM_LEVEL_COUNT 7
 static const float s_zoom_levels[ZOOM_LEVEL_COUNT] =
     { 1.0f, 1.35f, 1.75f, 2.25f, 2.75f, 3.35f, 4.0f };
@@ -51,6 +57,7 @@ static float s_pan_y[2];
 typedef struct {
     LoadedTexture tex[2];
     bool          valid[2];
+    char*         text[2];   /* EPUB text-only pages (heap); NULL if raster */
 } SpreadPair;
 
 enum {
@@ -70,6 +77,8 @@ static volatile int   s_pending_spread_idx; /* SI_CURR or SI_NEXT */
 static volatile int   s_pending_side;      /* 0=left, 1=right */
 static volatile int   s_pending_src_page;  /* 0-based page index for this fetch (for logs / errors) */
 static volatile bool  s_pending_ready;
+static volatile bool  s_pending_is_text;
+static char*          s_pending_text_heap;
 
 static Thread         s_progress_thread;
 static volatile bool  s_progress_thread_running;
@@ -105,6 +114,23 @@ typedef struct {
     int page;
 } FetchArgs;
 static FetchArgs s_fetch_args;
+
+/* EPUB text: one spine item flows left screen (top) then right (bottom), then D-pad
+ * advances to the next slice of the same chapter. Line index is rebuilt from text[0]. */
+static int*         s_epub_line_off = NULL;
+static int*         s_epub_line_len = NULL;
+static int          s_epub_line_n   = 0;
+static const char*  s_epub_lines_doc = NULL;
+static int          s_epub_seg_line0 = 0; /* first line index on this spread */
+static bool         s_epub_open_last_seg = false; /* go_prev spine: land on last spread */
+
+static void epub_lines_free(void);
+static bool reader_epub_dual_column(void);
+static void reader_epub_maybe_rebuild_lines(void);
+static bool epub_more_forward(void);
+static int  epub_lines_on_spread_from(int line0);
+static int  epub_prev_spread_line0(int seg0);
+static int  epub_last_spread_line0(void);
 
 /* ------------------------------------------------------------------ */
 /* Progress save                                                        */
@@ -159,10 +185,21 @@ static void fire_save_progress(int page) {
 /* Spread navigation                                                    */
 /* ------------------------------------------------------------------ */
 static bool can_advance_spread(void) {
+    if (g_app.reader_epub && reader_epub_dual_column()) {
+        if (epub_more_forward())
+            return true;
+        return g_app.reader_page + 1 < g_app.reader_total_pages;
+    }
     return g_app.reader_page + 2 < g_app.reader_total_pages;
 }
 
 static bool can_retreat_spread(void) {
+    if (g_app.reader_epub && reader_epub_dual_column()) {
+        reader_epub_maybe_rebuild_lines();
+        if (s_epub_seg_line0 > 0)
+            return true;
+        return g_app.reader_page > 0;
+    }
     return g_app.reader_page >= 2;
 }
 
@@ -171,8 +208,21 @@ static SpreadPair* spread_at(int idx) {
     return &s_sp[SI_CURR];
 }
 
+static bool spread_side_ready(const SpreadPair* s, int i) {
+    if (g_app.reader_epub && i == 1 && s->text[0] && s->text[0][0] && !s->valid[0]
+        && !s->valid[1] && !s->text[1])
+        return true; /* EPUB: right LCD is continuation of left spine item */
+    return s->valid[i] || (s->text[i] && s->text[i][0]);
+}
+
 static void spread_free(SpreadPair* s) {
     for (int i = 0; i < 2; i++) {
+        if (s->text[i]) {
+            if (s->text[i] == s_epub_lines_doc)
+                epub_lines_free();
+            free(s->text[i]);
+            s->text[i] = NULL;
+        }
         if (s->valid[i]) {
             image_texture_free(&s->tex[i]);
             s->valid[i] = false;
@@ -196,7 +246,9 @@ static void spread_move_into(SpreadPair* dst, SpreadPair* src) {
     for (int i = 0; i < 2; i++) {
         dst->tex[i]   = src->tex[i];
         dst->valid[i] = src->valid[i];
+        dst->text[i]  = src->text[i];
         src->valid[i] = false;
+        src->text[i]  = NULL;
         loaded_texture_relink(&dst->tex[i]);
     }
 }
@@ -205,18 +257,28 @@ static bool curr_spread_complete(void) {
     int P = g_app.reader_page;
     int T = g_app.reader_total_pages;
     if (P >= T) return false;
-    if (!s_sp[SI_CURR].valid[0]) return false;
-    if (P + 1 < T && !s_sp[SI_CURR].valid[1]) return false;
+    if (reader_epub_dual_column())
+        return spread_side_ready(&s_sp[SI_CURR], 0);
+    if (!spread_side_ready(&s_sp[SI_CURR], 0)) return false;
+    if (P + 1 < T && !spread_side_ready(&s_sp[SI_CURR], 1)) return false;
     return true;
 }
 
-/* Preload for go_next: both pages that will become SI_CURR after reader_page += 2. */
+/* Preload for go_next: PDF = next pair; EPUB dual = next spine when current is exhausted. */
 static bool next_spread_ready(void) {
     int P = g_app.reader_page;
     int T = g_app.reader_total_pages;
+    if (g_app.reader_epub && reader_epub_dual_column()) {
+        reader_epub_maybe_rebuild_lines();
+        if (epub_more_forward())
+            return true;
+        if (P + 1 >= T)
+            return false;
+        return spread_side_ready(&s_sp[SI_NEXT], 0);
+    }
     if (P + 2 >= T) return false;
-    if (!s_sp[SI_NEXT].valid[0]) return false;
-    if (P + 3 < T && !s_sp[SI_NEXT].valid[1]) return false;
+    if (!spread_side_ready(&s_sp[SI_NEXT], 0)) return false;
+    if (P + 3 < T && !spread_side_ready(&s_sp[SI_NEXT], 1)) return false;
     return true;
 }
 
@@ -228,6 +290,11 @@ static void discard_pending_page(void) {
     if (!s_pending_ready) return;
     if (LightEvent_TryWait(&s_page_ready_event) == 0)
         LightEvent_Clear(&s_page_ready_event);
+    if (s_pending_is_text && s_pending_text_heap) {
+        free(s_pending_text_heap);
+        s_pending_text_heap = NULL;
+    }
+    s_pending_is_text = false;
     image_prepared_free(&s_pending_prep);
     s_pending_ready = false;
 }
@@ -246,26 +313,68 @@ static void start_fetch(int page, int spread_idx, int side);
 static void fetch_page_thread(void* arg) {
     FetchArgs* a = (FetchArgs*)arg;
 
-    char url[512];
-    kavita_page_url(g_app.base_url, g_app.api_key,
-                     g_app.selected_chapter_id, a->page,
-                     url, sizeof(url));
-
-    HttpResponse* resp = http_get(url, g_app.token);
-    if (!resp || resp->status_code != 200) {
-        dlog("[reader][ERR] HTTP fail chap=%d page=%d (1-based) status=%d",
-             g_app.selected_chapter_id, a->page + 1,
-             resp ? resp->status_code : -1);
-        http_response_free(resp);
-        s_fetch_failed = true;
-        s_fetch_done   = true;
-        threadExit(0);
-    }
-
-    size_t body_sz = resp->size;
     PreparedTexture prep;
-    bool ok = image_prepare_from_mem((const u8*)resp->data, resp->size, &prep);
-    http_response_free(resp);
+    bool ok = false;
+    size_t body_sz = 0;
+    char url_log[512];
+    url_log[0] = '\0';
+
+    if (g_app.reader_epub) {
+        if (!epub_reader_is_open()) {
+            int pages = g_app.reader_total_pages;
+            if (!epub_reader_open_chapter(g_app.base_url, g_app.token,
+                                          g_app.selected_chapter_id, &pages)) {
+                dlog("[reader][ERR] epub open fail chap=%d", g_app.selected_chapter_id);
+                s_fetch_failed = true;
+                s_fetch_done   = true;
+                threadExit(0);
+            }
+            g_app.reader_total_pages = pages;
+        }
+        EpubPageKind ek;
+        u8* img = NULL;
+        size_t iz = 0;
+        char* txt = NULL;
+        if (!epub_reader_get_page_payload(a->page, &ek, &img, &iz, &txt)) {
+            dlog("[reader][ERR] epub page fail chap=%d page=%d",
+                 g_app.selected_chapter_id, a->page + 1);
+            s_fetch_failed = true;
+            s_fetch_done   = true;
+            threadExit(0);
+        }
+        if (ek == EPUB_PAGE_IMAGE) {
+            body_sz = iz;
+            ok = image_prepare_from_mem(img, iz, &prep);
+            free(img);
+            s_pending_is_text = false;
+        } else {
+            body_sz = txt ? strlen(txt) : 0;
+            ok = (txt != NULL);
+            memset(&prep, 0, sizeof(prep));
+            s_pending_is_text = true;
+            s_pending_text_heap = txt;
+        }
+    } else {
+        kavita_page_url(g_app.base_url, g_app.api_key,
+                         g_app.selected_chapter_id, a->page,
+                         url_log, sizeof(url_log));
+
+        HttpResponse* resp = http_get(url_log, g_app.token);
+        if (!resp || resp->status_code != 200) {
+            dlog("[reader][ERR] HTTP fail chap=%d page=%d (1-based) status=%d",
+                 g_app.selected_chapter_id, a->page + 1,
+                 resp ? resp->status_code : -1);
+            http_response_free(resp);
+            s_fetch_failed = true;
+            s_fetch_done   = true;
+            threadExit(0);
+        }
+
+        body_sz = resp->size;
+        ok = image_prepare_from_mem((const u8*)resp->data, resp->size, &prep);
+        http_response_free(resp);
+        s_pending_is_text = false;
+    }
 
     if (ok) {
         s_pending_prep        = prep;
@@ -275,7 +384,7 @@ static void fetch_page_thread(void* arg) {
         s_pending_ready       = true;
         LightEvent_Signal(&s_page_ready_event);
     } else {
-        const char* ut = url[0] ? url : "?";
+        const char* ut = url_log[0] ? url_log : "epub";
         size_t ul = strlen(ut);
         if (ul > 48) ut += ul - 48;
         dlog("[reader][ERR] prepare(thread) fail chap=%d page=%d (1-based) body=%zu url_tail=%s",
@@ -308,19 +417,31 @@ static void try_start_fetch(void) {
     int P = g_app.reader_page;
     int T = g_app.reader_total_pages;
 
-    if (P < T && !s_sp[SI_CURR].valid[0]) {
+    bool cur_epub_dual =
+        g_app.reader_epub && s_sp[SI_CURR].text[0] && s_sp[SI_CURR].text[0][0]
+        && !s_sp[SI_CURR].valid[0] && !s_sp[SI_CURR].valid[1] && !s_sp[SI_CURR].text[1];
+
+    if (P < T && !spread_side_ready(&s_sp[SI_CURR], 0)) {
         start_fetch(P, SI_CURR, 0);
         return;
     }
-    if (P + 1 < T && !s_sp[SI_CURR].valid[1]) {
+
+    if (g_app.reader_epub && cur_epub_dual) {
+        reader_epub_maybe_rebuild_lines();
+        if (!epub_more_forward() && P + 1 < T && !spread_side_ready(&s_sp[SI_NEXT], 0))
+            start_fetch(P + 1, SI_NEXT, 0);
+        return;
+    }
+
+    if (P + 1 < T && !spread_side_ready(&s_sp[SI_CURR], 1)) {
         start_fetch(P + 1, SI_CURR, 1);
         return;
     }
-    if (P + 2 < T && !s_sp[SI_NEXT].valid[0]) {
+    if (P + 2 < T && !spread_side_ready(&s_sp[SI_NEXT], 0)) {
         start_fetch(P + 2, SI_NEXT, 0);
         return;
     }
-    if (P + 2 < T && P + 3 < T && !s_sp[SI_NEXT].valid[1]) {
+    if (P + 2 < T && P + 3 < T && !spread_side_ready(&s_sp[SI_NEXT], 1)) {
         start_fetch(P + 3, SI_NEXT, 1);
         return;
     }
@@ -336,6 +457,51 @@ static void wait_fetch(void) {
 }
 
 static void go_next_spread(void) {
+    if (reader_epub_dual_column()) {
+        if (!curr_spread_complete()) return;
+        reader_epub_maybe_rebuild_lines();
+        int n = epub_lines_on_spread_from(s_epub_seg_line0);
+        if (n <= 0)
+            return;
+        if (s_epub_seg_line0 + n < s_epub_line_n) {
+            s_epub_seg_line0 += n;
+            s_pan_y[0] = s_pan_y[1] = 0.f;
+            s_pages_since_save++;
+            if (s_pages_since_save >= 3) {
+                fire_save_progress(g_app.reader_page);
+                s_pages_since_save = 0;
+            }
+            return;
+        }
+        if (g_app.reader_page + 1 >= g_app.reader_total_pages)
+            return;
+
+        wait_fetch();
+        discard_pending_page();
+
+        if (next_spread_ready()) {
+            spread_free(&s_sp[SI_CURR]);
+            spread_move_into(&s_sp[SI_CURR], &s_sp[SI_NEXT]);
+        } else {
+            spread_free(&s_sp[SI_CURR]);
+            spread_free(&s_sp[SI_NEXT]);
+        }
+
+        g_app.reader_page += 1;
+        s_epub_seg_line0 = 0;
+        epub_lines_free();
+
+        s_state = curr_spread_complete() ? READER_SHOW : READER_LOADING;
+        try_start_fetch();
+
+        s_pages_since_save++;
+        if (s_pages_since_save >= 3) {
+            fire_save_progress(g_app.reader_page);
+            s_pages_since_save = 0;
+        }
+        return;
+    }
+
     if (!can_advance_spread() || !curr_spread_complete()) return;
 
     wait_fetch();
@@ -366,6 +532,29 @@ static void go_next_spread(void) {
 static void go_prev_spread(void) {
     if (!can_retreat_spread()) return;
 
+    if (reader_epub_dual_column()) {
+        reader_epub_maybe_rebuild_lines();
+        if (s_epub_seg_line0 > 0) {
+            s_epub_seg_line0 = epub_prev_spread_line0(s_epub_seg_line0);
+            s_pan_y[0] = s_pan_y[1] = 0.f;
+            return;
+        }
+
+        wait_fetch();
+        discard_pending_page();
+        spread_free(&s_sp[SI_NEXT]);
+        spread_free(&s_sp[SI_CURR]);
+
+        g_app.reader_page -= 1;
+        s_epub_seg_line0     = 0;
+        s_epub_open_last_seg = true;
+        epub_lines_free();
+
+        s_state = READER_LOADING;
+        try_start_fetch();
+        return;
+    }
+
     wait_fetch();
     discard_pending_page();
     spread_free(&s_sp[SI_NEXT]);
@@ -378,15 +567,22 @@ static void go_prev_spread(void) {
     try_start_fetch();
 }
 
-/* Jump so the spread includes 1-based page `page_1` (same alignment as ±2 navigation). */
+/* Jump so the spread includes 1-based page `page_1` (EPUB: spine index; PDF: even-aligned). */
 static void reader_jump_to_page_1based(int page_1) {
     int T = g_app.reader_total_pages;
     if (T <= 0) return;
     if (page_1 < 1) page_1 = 1;
     if (page_1 > T) page_1 = T;
     int idx0   = page_1 - 1;
-    int new_rp = (idx0 / 2) * 2;
-    int max_rp = ((T - 1) / 2) * 2;
+    int new_rp;
+    int max_rp;
+    if (g_app.reader_epub) {
+        new_rp = idx0;
+        max_rp = T - 1;
+    } else {
+        new_rp = (idx0 / 2) * 2;
+        max_rp = ((T - 1) / 2) * 2;
+    }
     if (new_rp > max_rp) new_rp = max_rp;
 
     if (new_rp == g_app.reader_page && curr_spread_complete()
@@ -402,6 +598,9 @@ static void reader_jump_to_page_1based(int page_1) {
     spread_free(&s_sp[SI_CURR]);
     spread_free(&s_sp[SI_NEXT]);
     g_app.reader_page = new_rp;
+    s_epub_seg_line0     = 0;
+    s_epub_open_last_seg = false;
+    epub_lines_free();
     s_zoom_i = 0;
     s_pan_x[0] = s_pan_x[1] = s_pan_y[0] = s_pan_y[1] = 0.f;
     s_pages_since_save = 0;
@@ -553,6 +752,339 @@ static void draw_portrait_page_zoom(float log_w, float log_h,
     C2D_DrawImageAt(tex->image, cx, cy, 0.5f, NULL, scale, scale);
 }
 
+static float reader_epub_line_width(const char* line, float scale) {
+    if (!line || !line[0])
+        return 0.f;
+    C2D_TextBufClear(g_text_buf);
+    C2D_Text t;
+    C2D_TextParse(&t, g_text_buf, line);
+    C2D_TextOptimize(&t);
+    float w, h;
+    C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+    (void)h;
+    return w;
+}
+
+static float reader_epub_line_step(float scale) {
+    C2D_TextBufClear(g_text_buf);
+    C2D_Text t;
+    C2D_TextParse(&t, g_text_buf, "Mg");
+    C2D_TextOptimize(&t);
+    float w, h;
+    C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+    (void)w;
+    return h + READER_EPUB_LINE_GAP_SCALE * scale;
+}
+
+static void reader_epub_flush_line(float margin, float* cy, float line_h, float log_h,
+                                   float pan_y, float scale, const char* line, bool draw) {
+    if (!line[0])
+        return;
+    float sy = *cy - pan_y;
+    if (draw && sy + line_h > 0.f && sy < log_h) {
+        C2D_TextBufClear(g_text_buf);
+        C2D_Text t;
+        C2D_TextParse(&t, g_text_buf, line);
+        C2D_TextOptimize(&t);
+        C2D_DrawText(&t, C2D_WithColor, margin, sy, Z_READER_PAGE, scale, scale,
+                     COL_WHITE);
+    }
+    *cy += line_h;
+}
+
+/* One C2D_DrawText per wrapped line (per-word drawing can exhaust C2D object cap). */
+static float reader_epub_text_layout(float log_w, float log_h, const char* text,
+                                     float scale, float pan_y, bool draw) {
+    float margin = 8.f;
+    float max_w  = log_w - margin * 2.f;
+    if (max_w < 32.f)
+        max_w = 32.f;
+    float line_h = reader_epub_line_step(scale);
+    float cy     = 8.f;
+    char  line[640];
+    line[0] = '\0';
+
+    const char* r = text;
+    int         guard = 0;
+    while (*r && guard++ < 12000) {
+        while (*r == ' ')
+            r++;
+        if (!*r)
+            break;
+        const char* wstart = r;
+        while (*r && *r != ' ')
+            r++;
+        size_t wl = (size_t)(r - wstart);
+        char   word[192];
+        if (wl >= sizeof(word))
+            wl = sizeof(word) - 1;
+        memcpy(word, wstart, wl);
+        word[wl] = '\0';
+
+        char trial[640];
+        if (line[0]) {
+            snprintf(trial, sizeof(trial), "%s %s", line, word);
+        } else {
+            snprintf(trial, sizeof(trial), "%s", word);
+        }
+
+        float tw = reader_epub_line_width(trial, scale);
+        if (tw > max_w && line[0]) {
+            reader_epub_flush_line(margin, &cy, line_h, log_h, pan_y, scale, line, draw);
+            line[0] = '\0';
+            snprintf(trial, sizeof(trial), "%s", word);
+        }
+        snprintf(line, sizeof(line), "%s", trial);
+    }
+    reader_epub_flush_line(margin, &cy, line_h, log_h, pan_y, scale, line, draw);
+    return (cy - 8.f) + line_h;
+}
+
+static void epub_lines_free(void) {
+    free(s_epub_line_off);
+    free(s_epub_line_len);
+    s_epub_line_off  = NULL;
+    s_epub_line_len  = NULL;
+    s_epub_line_n    = 0;
+    s_epub_lines_doc = NULL;
+}
+
+/* Left = EPUB text spine item; right = continuation (no separate spine fetch). */
+static bool reader_epub_dual_column(void) {
+    return g_app.reader_epub && s_sp[SI_CURR].text[0] && s_sp[SI_CURR].text[0][0]
+           && !s_sp[SI_CURR].valid[0] && !s_sp[SI_CURR].valid[1] && !s_sp[SI_CURR].text[1];
+}
+
+static float reader_epub_dual_col_w(void) {
+    float w = TOP_LOG_W < BOT_LOG_W ? TOP_LOG_W : BOT_LOG_W;
+    return w - 16.f;
+}
+
+static int s_epub_line_build_cap;
+
+static bool epub_line_table_push(int off, int len) {
+    if (len <= 0)
+        return true;
+    if (s_epub_line_n >= s_epub_line_build_cap) {
+        int ncap = s_epub_line_build_cap * 2;
+        int* no  = (int*)realloc(s_epub_line_off, (size_t)ncap * sizeof(int));
+        int* nl  = (int*)realloc(s_epub_line_len, (size_t)ncap * sizeof(int));
+        if (!no || !nl) {
+            free(no);
+            free(nl);
+            return false;
+        }
+        s_epub_line_off = no;
+        s_epub_line_len = nl;
+        s_epub_line_build_cap = ncap;
+    }
+    s_epub_line_off[s_epub_line_n] = off;
+    s_epub_line_len[s_epub_line_n] = len;
+    s_epub_line_n++;
+    return true;
+}
+
+/* Build UTF-8 line table for `doc` at column width col_w (same both screens). */
+static void epub_rebuild_wrapped_lines(const char* doc, float col_w, float scale) {
+    epub_lines_free();
+    if (!doc || !doc[0]) {
+        s_epub_seg_line0 = 0;
+        return;
+    }
+
+    float max_w = col_w;
+    if (max_w < 32.f)
+        max_w = 32.f;
+
+    s_epub_line_build_cap = 256;
+    s_epub_line_off       = (int*)malloc((size_t)s_epub_line_build_cap * sizeof(int));
+    s_epub_line_len       = (int*)malloc((size_t)s_epub_line_build_cap * sizeof(int));
+    if (!s_epub_line_off || !s_epub_line_len) {
+        epub_lines_free();
+        return;
+    }
+
+    const char* line_doc0 = NULL;
+    char        line[640];
+    line[0] = '\0';
+    const char* r = doc;
+    int         guard = 0;
+
+    while (*r && guard++ < 200000) {
+        if (*r == '\n') {
+            if (line[0] && line_doc0) {
+                if (!epub_line_table_push((int)(line_doc0 - doc), (int)(r - line_doc0)))
+                    break;
+                line[0] = '\0';
+            }
+            r++;
+            continue;
+        }
+        while (*r == ' ')
+            r++;
+        if (!*r)
+            break;
+        const char* wstart = r;
+        while (*r && *r != ' ' && *r != '\n')
+            r++;
+        size_t wl = (size_t)(r - wstart);
+        char   word[192];
+        if (wl >= sizeof(word))
+            wl = sizeof(word) - 1;
+        memcpy(word, wstart, wl);
+        word[wl] = '\0';
+
+        char trial[640];
+        if (line[0]) {
+            snprintf(trial, sizeof(trial), "%s %s", line, word);
+        } else {
+            snprintf(trial, sizeof(trial), "%s", word);
+        }
+
+        float tw = reader_epub_line_width(trial, scale);
+        if (tw > max_w && line[0] && line_doc0) {
+            if (!epub_line_table_push((int)(line_doc0 - doc), (int)(wstart - line_doc0)))
+                break;
+            line[0] = '\0';
+            snprintf(trial, sizeof(trial), "%s", word);
+        }
+        if (!line[0])
+            line_doc0 = wstart;
+        snprintf(line, sizeof(line), "%s", trial);
+    }
+    if (line[0] && line_doc0) {
+        const char* dend = doc + strlen(doc);
+        epub_line_table_push((int)(line_doc0 - doc), (int)(dend - line_doc0));
+    }
+
+    s_epub_lines_doc = doc;
+    if (s_epub_seg_line0 >= s_epub_line_n)
+        s_epub_seg_line0 = 0;
+}
+
+static int epub_lines_on_spread_from(int line0) {
+    float step = reader_epub_line_step(READER_EPUB_TEXT_TOP);
+    float y    = 8.f;
+    int   i    = line0;
+    int   used = 0;
+    while (i < s_epub_line_n && y + step <= TOP_LOG_H - 8.f) {
+        y += step;
+        i++;
+        used++;
+    }
+    y = 8.f;
+    while (i < s_epub_line_n && y + step <= BOT_LOG_H - 8.f) {
+        y += step;
+        i++;
+        used++;
+    }
+    return used;
+}
+
+static int epub_prev_spread_line0(int seg0) {
+    if (seg0 <= 0)
+        return 0;
+    int L = 0;
+    for (;;) {
+        int n = epub_lines_on_spread_from(L);
+        if (n <= 0)
+            return 0;
+        if (L + n >= seg0)
+            return L;
+        L += n;
+    }
+}
+
+static int epub_last_spread_line0(void) {
+    if (s_epub_line_n <= 0)
+        return 0;
+    int L = 0;
+    for (;;) {
+        int n = epub_lines_on_spread_from(L);
+        if (n <= 0)
+            return L;
+        if (L + n >= s_epub_line_n)
+            return L;
+        L += n;
+    }
+}
+
+static bool epub_more_forward(void) {
+    if (!reader_epub_dual_column() || s_epub_line_n <= 0)
+        return false;
+    int n = epub_lines_on_spread_from(s_epub_seg_line0);
+    return s_epub_seg_line0 + n < s_epub_line_n;
+}
+
+static void reader_epub_maybe_rebuild_lines(void) {
+    if (!reader_epub_dual_column())
+        return;
+    const char* doc = s_sp[SI_CURR].text[0];
+    if (doc == s_epub_lines_doc && s_epub_line_n > 0)
+        return;
+    epub_rebuild_wrapped_lines(doc, reader_epub_dual_col_w(), READER_EPUB_TEXT_TOP);
+}
+
+static void reader_epub_draw_line_at(float margin, float y, float scale, int idx) {
+    if (idx < 0 || idx >= s_epub_line_n)
+        return;
+    const char* doc = s_sp[SI_CURR].text[0];
+    int         off = s_epub_line_off[idx];
+    int         len = s_epub_line_len[idx];
+    char        buf[512];
+    if (len >= (int)sizeof(buf))
+        len = (int)sizeof(buf) - 1;
+    memcpy(buf, doc + off, (size_t)len);
+    buf[len] = '\0';
+    C2D_TextBufClear(g_text_buf);
+    C2D_Text t;
+    C2D_TextParse(&t, g_text_buf, buf);
+    C2D_TextOptimize(&t);
+    C2D_DrawText(&t, C2D_WithColor, margin, y, Z_READER_PAGE, scale, scale, COL_WHITE);
+}
+
+static void reader_epub_draw_dual_top(void) {
+    reader_epub_maybe_rebuild_lines();
+    float margin = 8.f;
+    float scale  = READER_EPUB_TEXT_TOP;
+    float step   = reader_epub_line_step(scale);
+    float y      = margin;
+    int   i      = s_epub_seg_line0;
+    while (i < s_epub_line_n && y + step <= TOP_LOG_H - 8.f) {
+        reader_epub_draw_line_at(margin, y, scale, i);
+        y += step;
+        i++;
+    }
+}
+
+static void reader_epub_draw_dual_bottom(void) {
+    reader_epub_maybe_rebuild_lines();
+    float margin = 8.f;
+    float scale  = READER_EPUB_TEXT_TOP;
+    float step   = reader_epub_line_step(scale);
+    float y      = margin;
+    int   i      = s_epub_seg_line0;
+    while (i < s_epub_line_n && y + step <= TOP_LOG_H - 8.f) {
+        i++;
+        y += step;
+    }
+    y = margin;
+    while (i < s_epub_line_n && y + step <= BOT_LOG_H - 8.f) {
+        reader_epub_draw_line_at(margin, y, scale, i);
+        y += step;
+        i++;
+    }
+}
+
+static void clamp_text_pan(float log_h, float content_h, float* pan_y) {
+    float view = log_h - 16.f;
+    float max_pan = (content_h > view) ? (content_h - view) : 0.f;
+    if (*pan_y < 0.f)
+        *pan_y = 0.f;
+    if (*pan_y > max_pan)
+        *pan_y = max_pan;
+}
+
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                            */
 /* ------------------------------------------------------------------ */
@@ -560,13 +1092,17 @@ void screen_reader_init(void) {
     for (int i = 0; i < SI_COUNT; i++)
         spread_free(&s_sp[i]);
 
-    /* PDF chapters: correct page count and server-side cache after rasterize. */
-    int info_pages = 0;
-    if (kavita_get_chapter_info_pages(g_app.base_url, g_app.token,
-                                       g_app.selected_chapter_id, &info_pages)) {
-        g_app.reader_total_pages = info_pages;
-        if (g_app.reader_page >= g_app.reader_total_pages)
-            g_app.reader_page = 0;
+    /* PDF: refresh page count / server cache. EPUB uses list count; spine fixed at open. */
+    if (!g_app.reader_epub) {
+        int info_pages = 0;
+        if (kavita_get_chapter_info_pages(g_app.base_url, g_app.token,
+                                           g_app.selected_chapter_id, &info_pages)) {
+            g_app.reader_total_pages = info_pages;
+            if (g_app.reader_page >= g_app.reader_total_pages)
+                g_app.reader_page = 0;
+        }
+    } else if (g_app.reader_page >= g_app.reader_total_pages && g_app.reader_total_pages > 0) {
+        g_app.reader_page = 0;
     }
 
     s_state          = READER_LOADING;
@@ -583,6 +1119,12 @@ void screen_reader_init(void) {
 
     LightEvent_Init(&s_page_ready_event, RESET_ONESHOT);
 
+    s_pending_is_text   = false;
+    s_pending_text_heap = NULL;
+
+    s_epub_seg_line0     = 0;
+    s_epub_open_last_seg = false;
+
     s_zoom_i     = 0;
     s_pan_x[0]   = 0.f;
     s_pan_x[1]   = 0.f;
@@ -593,20 +1135,26 @@ void screen_reader_init(void) {
 }
 
 void screen_reader_fini(void) {
-    if (s_sp[SI_CURR].valid[0] || s_sp[SI_CURR].valid[1]) {
+    if (spread_side_ready(&s_sp[SI_CURR], 0) || spread_side_ready(&s_sp[SI_CURR], 1)) {
         fire_save_progress(g_app.reader_page);
         wait_progress_thread();
     }
 
     wait_fetch();
+    epub_reader_close();
 
     for (int i = 0; i < SI_COUNT; i++)
         spread_free(&s_sp[i]);
 
-    if (s_pending_ready) {
-        image_prepared_free(&s_pending_prep);
-        s_pending_ready = false;
+    if (s_pending_ready)
+        discard_pending_page();
+    if (s_pending_text_heap) {
+        free(s_pending_text_heap);
+        s_pending_text_heap = NULL;
     }
+    s_pending_is_text = false;
+    image_prepared_free(&s_pending_prep);
+    s_pending_ready = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -622,34 +1170,61 @@ void screen_reader_tick(void) {
         SpreadPair* sp = spread_at(si);
         int had_tex_before_free = sp->valid[sd] ? 1 : 0;
 
-        if (sp->valid[sd]) image_texture_free(&sp->tex[sd]);
-        if (image_upload_prepared(&s_pending_prep, &sp->tex[sd])) {
-            sp->valid[sd] = true;
-            /* Join the HTTP thread before try_start_fetch; it still holds s_fetch_thread. */
+        if (s_pending_is_text) {
+            if (sp->text[sd]) {
+                if (sp->text[sd] == s_epub_lines_doc)
+                    epub_lines_free();
+                free(sp->text[sd]);
+                sp->text[sd] = NULL;
+            }
+            if (sp->valid[sd]) {
+                image_texture_free(&sp->tex[sd]);
+                sp->valid[sd] = false;
+            }
+            sp->text[sd]        = s_pending_text_heap;
+            s_pending_text_heap = NULL;
+            s_pending_is_text   = false;
+            if (g_app.reader_epub && si == SI_CURR && sd == 0)
+                s_epub_seg_line0 = 0;
+            image_prepared_free(&s_pending_prep);
             wait_fetch();
             try_start_fetch();
             if (s_state == READER_LOADING && curr_spread_complete())
                 s_state = READER_SHOW;
         } else {
-            dlog("[reader][ERR] upload(main) FAIL kavita_page=%d si=%d sd=%d "
-                 "reader_P=%d reader_state=%d had_tex_before_replace=%d prep_valid=%d "
-                 "prep_tex=%dx%d prep_src=%dx%d spread_logical_pg=%d",
-                 pg_1, si, sd, reader_p, (int)s_state, had_tex_before_free,
-                 s_pending_prep.valid ? 1 : 0,
-                 s_pending_prep.tex_w, s_pending_prep.tex_h,
-                 s_pending_prep.src_w, s_pending_prep.src_h,
-                 spread_side_page_1based(si, sd));
-            image_prepared_free(&s_pending_prep);
-            wait_fetch();
-            if (si == SI_CURR) {
-                s_state = READER_ERROR;
-                snprintf(s_error_msg, sizeof(s_error_msg),
-                         "Failed to decode page %d", pg_1);
-                dlog("[reader][ERR] READER_ERROR set (curr slot) user_msg: %s", s_error_msg);
-            } else {
-                dlog("[reader][ERR] preload upload fail (no full-screen error) si=%d", si);
+            if (sp->text[sd]) {
+                free(sp->text[sd]);
+                sp->text[sd] = NULL;
             }
-            /* Preload decode errors: no auto-retry here (avoid a tight fail loop). */
+            if (sp->valid[sd]) image_texture_free(&sp->tex[sd]);
+            if (image_upload_prepared(&s_pending_prep, &sp->tex[sd])) {
+                sp->valid[sd] = true;
+                /* Join the HTTP thread before try_start_fetch; it still holds s_fetch_thread. */
+                wait_fetch();
+                try_start_fetch();
+                if (s_state == READER_LOADING && curr_spread_complete())
+                    s_state = READER_SHOW;
+            } else {
+                dlog("[reader][ERR] upload(main) FAIL kavita_page=%d si=%d sd=%d "
+                     "reader_P=%d reader_state=%d had_tex_before_replace=%d prep_valid=%d "
+                     "prep_tex=%dx%d prep_src=%dx%d spread_logical_pg=%d",
+                     pg_1, si, sd, reader_p, (int)s_state, had_tex_before_free,
+                     s_pending_prep.valid ? 1 : 0,
+                     s_pending_prep.tex_w, s_pending_prep.tex_h,
+                     s_pending_prep.src_w, s_pending_prep.src_h,
+                     spread_side_page_1based(si, sd));
+                image_prepared_free(&s_pending_prep);
+                wait_fetch();
+                if (si == SI_CURR) {
+                    s_state = READER_ERROR;
+                    snprintf(s_error_msg, sizeof(s_error_msg),
+                             "Failed to decode page %d", pg_1);
+                    dlog("[reader][ERR] READER_ERROR set (curr slot) user_msg: %s", s_error_msg);
+                } else {
+                    dlog("[reader][ERR] preload upload fail (no full-screen error) si=%d", si);
+                }
+                /* Preload decode errors: no auto-retry here (avoid a tight fail loop). */
+            }
         }
         s_pending_ready = false;
     }
@@ -661,10 +1236,11 @@ void screen_reader_tick(void) {
 
         if (s_fetch_failed) {
             dlog("[reader][ERR] join thread_fail kavita_page=%d si=%d sd=%d reader_P=%d "
-                 "state=%d curr_v=%d/%d",
+                 "state=%d curr_r=%d/%d",
                  s_fetch_args.page + 1, s_fetch_args.spread_idx, s_fetch_args.side,
                  g_app.reader_page, (int)s_state,
-                 s_sp[SI_CURR].valid[0] ? 1 : 0, s_sp[SI_CURR].valid[1] ? 1 : 0);
+                 spread_side_ready(&s_sp[SI_CURR], 0) ? 1 : 0,
+                 spread_side_ready(&s_sp[SI_CURR], 1) ? 1 : 0);
             if (s_state == READER_LOADING && !curr_spread_complete()) {
                 s_state = READER_ERROR;
                 snprintf(s_error_msg, sizeof(s_error_msg),
@@ -678,6 +1254,12 @@ void screen_reader_tick(void) {
 
     if (curr_spread_complete() && s_state == READER_LOADING) {
         s_state = READER_SHOW;
+    }
+
+    reader_epub_maybe_rebuild_lines();
+    if (s_epub_open_last_seg && reader_epub_dual_column() && s_epub_line_n > 0) {
+        s_epub_seg_line0     = epub_last_spread_line0();
+        s_epub_open_last_seg = false;
     }
 
     if (s_show_hint && s_hint_frames > 0) s_hint_frames--;
@@ -723,7 +1305,11 @@ void screen_reader_tick(void) {
                 go_next_spread();
             }
 
-            if (z > 1.0005f) {
+            bool epub_text_scroll =
+                g_app.reader_epub && !reader_epub_dual_column()
+                && ((s_sp[SI_CURR].text[0] && s_sp[SI_CURR].text[0][0])
+                    || (s_sp[SI_CURR].text[1] && s_sp[SI_CURR].text[1][0]));
+            if (z > 1.0005f || epub_text_scroll) {
                 circlePosition cir;
                 hidCircleRead(&cir);
                 /* Book mode (+90°): dx -> vertical pan, dy -> horizontal pan */
@@ -733,11 +1319,13 @@ void screen_reader_tick(void) {
                     s_pan_y[0] += adj;
                     s_pan_y[1] += adj;
                 }
-                float dy = (float)cir.dy;
-                if (dy < -14.f || dy > 14.f) {
-                    float adj = dy * 0.2f;
-                    s_pan_x[0] += adj;
-                    s_pan_x[1] += adj;
+                if (z > 1.0005f) {
+                    float dy = (float)cir.dy;
+                    if (dy < -14.f || dy > 14.f) {
+                        float adj = dy * 0.2f;
+                        s_pan_x[0] += adj;
+                        s_pan_x[1] += adj;
+                    }
                 }
             }
         }
@@ -760,10 +1348,20 @@ void screen_reader_tick(void) {
         if (s_sp[SI_CURR].valid[0]) {
             clamp_pan_x(TOP_LOG_W, TOP_LOG_H, &s_sp[SI_CURR].tex[0], zz, &s_pan_x[0]);
             clamp_pan_y(TOP_LOG_W, TOP_LOG_H, &s_sp[SI_CURR].tex[0], zz, &s_pan_y[0]);
+        } else if (g_app.reader_epub && s_sp[SI_CURR].text[0] && !reader_epub_dual_column()) {
+            float ch = reader_epub_text_layout(TOP_LOG_W, TOP_LOG_H, s_sp[SI_CURR].text[0],
+                                               READER_EPUB_TEXT_TOP, s_pan_y[0], false);
+            clamp_text_pan(TOP_LOG_H, ch, &s_pan_y[0]);
+            s_pan_x[0] = 0.f;
         }
         if (s_sp[SI_CURR].valid[1]) {
             clamp_pan_x(BOT_LOG_W, BOT_LOG_H, &s_sp[SI_CURR].tex[1], zz, &s_pan_x[1]);
             clamp_pan_y(BOT_LOG_W, BOT_LOG_H, &s_sp[SI_CURR].tex[1], zz, &s_pan_y[1]);
+        } else if (g_app.reader_epub && s_sp[SI_CURR].text[1] && !reader_epub_dual_column()) {
+            float ch = reader_epub_text_layout(BOT_LOG_W, BOT_LOG_H, s_sp[SI_CURR].text[1],
+                                               READER_EPUB_TEXT_BOT, s_pan_y[1], false);
+            clamp_text_pan(BOT_LOG_H, ch, &s_pan_y[1]);
+            s_pan_x[1] = 0.f;
         }
     }
 
@@ -782,7 +1380,7 @@ void screen_reader_tick(void) {
             reader_text_centered(s_error_msg, TOP_LOG_W, TOP_LOG_H * 0.5f - 20.f,
                                  FONT_MED, COL_ERROR);
         } else if (g_app.reader_page < g_app.reader_total_pages
-                   && !s_sp[SI_CURR].valid[0]) {
+                   && !spread_side_ready(&s_sp[SI_CURR], 0)) {
             reader_spinner_draw(&s_spinner, TOP_LOG_W * 0.5f, TOP_LOG_H * 0.5f,
                                 28.0f, COL_ACCENT);
             char loading_str[64];
@@ -790,9 +1388,16 @@ void screen_reader_tick(void) {
                      "Loading %d...", g_app.reader_page + 1);
             reader_text_centered(loading_str, TOP_LOG_W, TOP_LOG_H * 0.5f + 48.f,
                                  FONT_MED, COL_GREY);
-        } else if (s_sp[SI_CURR].valid[0]) {
-            draw_portrait_page_zoom(TOP_LOG_W, TOP_LOG_H, &s_sp[SI_CURR].tex[0],
-                                    s_pan_x[0], s_pan_y[0], reader_zoom());
+        } else if (spread_side_ready(&s_sp[SI_CURR], 0)) {
+            if (s_sp[SI_CURR].valid[0]) {
+                draw_portrait_page_zoom(TOP_LOG_W, TOP_LOG_H, &s_sp[SI_CURR].tex[0],
+                                        s_pan_x[0], s_pan_y[0], reader_zoom());
+            } else if (reader_epub_dual_column()) {
+                reader_epub_draw_dual_top();
+            } else {
+                reader_epub_text_layout(TOP_LOG_W, TOP_LOG_H, s_sp[SI_CURR].text[0],
+                                        READER_EPUB_TEXT_TOP, s_pan_y[0], true);
+            }
         }
 
         char pg[40];
@@ -820,14 +1425,34 @@ void screen_reader_tick(void) {
         C2D_ViewSave(&save);
         reader_apply_book_transform(BOT_PHYS_W, BOT_PHYS_H);
 
-        if (g_app.reader_page + 1 < g_app.reader_total_pages) {
+        if (reader_epub_dual_column()) {
             if (s_state == READER_ERROR) {
                 reader_text_centered(s_error_msg, BOT_LOG_W, BOT_LOG_H * 0.5f,
                                      FONT_SMALL, COL_ERROR);
-            } else if (s_sp[SI_CURR].valid[1]) {
-                draw_portrait_page_zoom(BOT_LOG_W, BOT_LOG_H, &s_sp[SI_CURR].tex[1],
-                                        s_pan_x[1], s_pan_y[1], reader_zoom());
-            } else if (s_sp[SI_CURR].valid[0]) {
+            } else if (spread_side_ready(&s_sp[SI_CURR], 0)) {
+                reader_epub_draw_dual_bottom();
+            } else {
+                reader_spinner_draw(&s_spinner, BOT_LOG_W * 0.5f, BOT_LOG_H * 0.5f,
+                                    24.0f, COL_ACCENT);
+                char loading_str[64];
+                snprintf(loading_str, sizeof(loading_str),
+                         "Loading %d...", g_app.reader_page + 1);
+                reader_text_centered(loading_str, BOT_LOG_W,
+                                     BOT_LOG_H * 0.5f + 40.f, FONT_SMALL, COL_GREY);
+            }
+        } else if (g_app.reader_page + 1 < g_app.reader_total_pages) {
+            if (s_state == READER_ERROR) {
+                reader_text_centered(s_error_msg, BOT_LOG_W, BOT_LOG_H * 0.5f,
+                                     FONT_SMALL, COL_ERROR);
+            } else if (spread_side_ready(&s_sp[SI_CURR], 1)) {
+                if (s_sp[SI_CURR].valid[1]) {
+                    draw_portrait_page_zoom(BOT_LOG_W, BOT_LOG_H, &s_sp[SI_CURR].tex[1],
+                                            s_pan_x[1], s_pan_y[1], reader_zoom());
+                } else {
+                    reader_epub_text_layout(BOT_LOG_W, BOT_LOG_H, s_sp[SI_CURR].text[1],
+                                            READER_EPUB_TEXT_BOT, s_pan_y[1], true);
+                }
+            } else if (spread_side_ready(&s_sp[SI_CURR], 0)) {
                 /* Right page still fetching: always redraw (not gated on LOADING). */
                 reader_spinner_draw(&s_spinner, BOT_LOG_W * 0.5f, BOT_LOG_H * 0.5f,
                                     24.0f, COL_ACCENT);
@@ -854,8 +1479,10 @@ void screen_reader_tick(void) {
 
         char pg2[40];
         snprintf(pg2, sizeof(pg2), "%d/%d",
-                 g_app.reader_page + 2, g_app.reader_total_pages);
-        if (g_app.reader_page + 1 < g_app.reader_total_pages) {
+                 reader_epub_dual_column() ? (g_app.reader_page + 1)
+                                           : (g_app.reader_page + 2),
+                 g_app.reader_total_pages);
+        if (reader_epub_dual_column() || g_app.reader_page + 1 < g_app.reader_total_pages) {
             C2D_DrawRectSolid(BOT_LOG_W - 44, 4, Z_READER_PAGE_BADGE_BG, 40, 16,
                               C2D_Color32(0, 0, 0, 180));
             reader_text_draw_z(pg2, BOT_LOG_W - 42, 5, FONT_TINY, COL_WHITE,
@@ -876,10 +1503,10 @@ void screen_reader_tick(void) {
             const float line_step = 15.f;
             C2D_DrawRectSolid(8, hint_top, Z_READER_HINT_BG, BOT_LOG_W - 16,
                               hint_h, C2D_Color32(0, 0, 0, 200));
-            reader_text_centered_z("D-Pad Up / Down: Zoom In / Out",
+            reader_text_centered_z("D-Pad L/R: Zoom (images; not EPUB text size)",
                                     BOT_LOG_W, line_y0, FONT_TINY, COL_WHITE,
                                     Z_READER_HUD_FG);
-            reader_text_centered_z("Circle Pad (Whilst Zoomed): Pan Viewport",
+            reader_text_centered_z("Circle Pad: Pan when zoomed / scroll EPUB text",
                                     BOT_LOG_W, line_y0 + line_step, FONT_TINY,
                                     COL_GREY, Z_READER_HUD_FG);
             reader_text_centered_z("Start: Go To page", BOT_LOG_W,
@@ -888,7 +1515,7 @@ void screen_reader_tick(void) {
             reader_text_centered_z("B: Back to Chapter List", BOT_LOG_W,
                                     line_y0 + 3.f * line_step, FONT_TINY,
                                     COL_GREY, Z_READER_HUD_FG);
-            reader_text_centered_z("D-Pad Left / Right: Previous / Next Page",
+            reader_text_centered_z("D-Pad Up/Down: Previous / Next",
                                     BOT_LOG_W, line_y0 + 4.f * line_step,
                                     FONT_TINY, COL_GREY, Z_READER_HUD_FG);
         }

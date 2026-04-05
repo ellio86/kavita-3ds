@@ -39,7 +39,8 @@ int main(int argc, char* argv[]) {
 
     /* --- citro2d/citro3d init --- */
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
-    C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
+    /* Extra headroom: EPUB text + HUD + lists can push many quads per frame. */
+    C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 2);
     C2D_Prepare();
 
     /* Create render targets for both screens */

@@ -39,6 +39,7 @@ typedef struct {
     int  selected_chapter_id;
     int  reader_page;
     int  reader_total_pages;
+    bool reader_epub;       /* EPUB: pages from downloaded archive, not Reader/image */
 
     /* Set to true to request app exit from any screen */
     bool exit_requested;

@@ -38,6 +38,7 @@ typedef struct {
     int  pages;
     int  pages_read;
     bool is_special;  /* Kavita ChapterDto.isSpecial — one-shot / extra issues */
+    bool is_epub;     /* first file extension .epub — client-side EPUB reader */
 } KavitaChapter;
 
 typedef struct {
@@ -114,6 +115,10 @@ void kavita_chapter_cover_url(const char* base_url, const char* api_key,
 
 void kavita_page_url(const char* base_url, const char* api_key,
                       int chapter_id, int page, char* buf, size_t sz);
+
+/* GET /api/Download/chapter?chapterId= (Bearer auth). */
+void kavita_chapter_download_url(const char* base_url, int chapter_id,
+                                 char* buf, size_t sz);
 
 /* GET /api/Reader/chapter-info?extractPdf=true — refreshes page count after PDF
  * unpack (volumes list can be stale or 0 for PDF). Fills *pages_out on success. */

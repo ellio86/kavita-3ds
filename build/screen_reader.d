@@ -114,6 +114,7 @@ screen_reader.o: \
  C:/devkitPro/libctru/include/c2d/text.h \
  C:/devkitPro/libctru/include/c2d/font.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/epub_reader.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h \
@@ -232,6 +233,7 @@ C:/devkitPro/libctru/include/c2d/sprite.h:
 C:/devkitPro/libctru/include/c2d/text.h:
 C:/devkitPro/libctru/include/c2d/font.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/epub_reader.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h:

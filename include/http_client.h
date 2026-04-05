@@ -25,6 +25,9 @@ void http_client_fini(void);
    Returns NULL on error. Caller must call http_response_free(). */
 HttpResponse* http_get(const char* url, const char* token);
 
+/* GET for binary bodies (Accept: any); used for chapter archive download. */
+HttpResponse* http_get_binary(const char* url, const char* token);
+
 /* Perform a POST request with JSON body.
    token: if non-NULL, adds Authorization: Bearer header.
    Returns NULL on error. Caller must call http_response_free(). */

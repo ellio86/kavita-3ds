@@ -448,6 +448,7 @@ bool kavita_get_series_detail(const char* base_url, const char* token,
 
             c->volume_id = v->id;
             c->is_special = cJSON_IsBool(cispec) && cJSON_IsTrue(cispec);
+            c->is_epub    = false;
             if (cJSON_IsNumber(cid))    c->id         = cid->valueint;
             /* Prefer titleName, then title, then range (Kavita ChapterDto). */
             if (cJSON_IsString(ctitleNm) && ctitleNm->valuestring)
@@ -471,6 +472,33 @@ bool kavita_get_series_detail(const char* base_url, const char* token,
                             chapter_title_from_filepath(fpath->valuestring,
                                                         c->title,
                                                         sizeof(c->title));
+                    }
+                }
+            }
+
+            {
+                cJSON* cfiles = cJSON_GetObjectItemCaseSensitive(ch, "files");
+                if (cJSON_IsArray(cfiles) && cJSON_GetArraySize(cfiles) > 0) {
+                    cJSON* f0 = cJSON_GetArrayItem(cfiles, 0);
+                    if (f0) {
+                        cJSON* ext =
+                            cJSON_GetObjectItemCaseSensitive(f0, "extension");
+                        if (cJSON_IsString(ext) && ext->valuestring) {
+                            const char* e = ext->valuestring;
+                            if (e[0] == '.') e++;
+                            if (strcasecmp(e, "epub") == 0)
+                                c->is_epub = true;
+                        }
+                        if (!c->is_epub) {
+                            cJSON* fpath =
+                                cJSON_GetObjectItemCaseSensitive(f0, "filePath");
+                            if (cJSON_IsString(fpath) && fpath->valuestring) {
+                                const char* fp = fpath->valuestring;
+                                size_t n = strlen(fp);
+                                if (n > 5 && strcasecmp(fp + n - 5, ".epub") == 0)
+                                    c->is_epub = true;
+                            }
+                        }
                     }
                 }
             }
@@ -574,6 +602,12 @@ void kavita_chapter_cover_url(const char* base_url, const char* api_key,
                                int chapter_id, char* buf, size_t sz) {
     snprintf(buf, sz, "%s/api/Image/chapter-cover?chapterId=%d&apiKey=%s",
              base_url, chapter_id, api_key ? api_key : "");
+}
+
+void kavita_chapter_download_url(const char* base_url, int chapter_id,
+                                  char* buf, size_t sz) {
+    snprintf(buf, sz, "%s/api/Download/chapter?chapterId=%d",
+             base_url, chapter_id);
 }
 
 void kavita_page_url(const char* base_url, const char* api_key,

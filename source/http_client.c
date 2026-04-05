@@ -299,7 +299,8 @@ static size_t decode_chunked(char* buf, size_t len) {
 static HttpResponse* do_request(const char* url,
                                  const char* token,
                                  const char* method,
-                                 const char* json_body) {
+                                 const char* json_body,
+                                 const char* accept) {
     char current_url[512];
     strncpy(current_url, url, sizeof(current_url) - 1);
     current_url[sizeof(current_url) - 1] = '\0';
@@ -341,7 +342,12 @@ static HttpResponse* do_request(const char* url,
         SEND(line, (size_t)n);
 
         SENDL("User-Agent: kavita-3ds/1.0\r\n");
-        SENDL("Accept: application/json\r\n");
+        if (accept && accept[0]) {
+            n = snprintf(line, sizeof(line), "Accept: %s\r\n", accept);
+            SEND(line, (size_t)n);
+        } else {
+            SENDL("Accept: application/json\r\n");
+        }
         SENDL("Accept-Encoding: identity\r\n");
         SENDL("Connection: close\r\n");
 
@@ -480,12 +486,16 @@ static HttpResponse* do_request(const char* url,
 /* ------------------------------------------------------------------ */
 
 HttpResponse* http_get(const char* url, const char* token) {
-    return do_request(url, token, "GET", NULL);
+    return do_request(url, token, "GET", NULL, "application/json");
+}
+
+HttpResponse* http_get_binary(const char* url, const char* token) {
+    return do_request(url, token, "GET", NULL, "*/*");
 }
 
 HttpResponse* http_post_json(const char* url, const char* token,
                               const char* json_body) {
-    return do_request(url, token, "POST", json_body);
+    return do_request(url, token, "POST", json_body, "application/json");
 }
 
 void http_response_free(HttpResponse* r) {

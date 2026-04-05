@@ -332,6 +332,7 @@ void screen_detail_tick(void) {
             KavitaChapter* ch = &s_detail.chapters[gi];
             g_app.selected_chapter_id = ch->id;
             g_app.selected_volume_id  = ch->volume_id;
+            g_app.reader_epub         = ch->is_epub;
             g_app.reader_total_pages  = ch->pages;
             /* Resume from last read page */
             g_app.reader_page = (ch->pages_read > 0 && ch->pages_read < ch->pages)
