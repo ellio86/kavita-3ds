@@ -7,9 +7,16 @@
 #include "ui.h"
 
 #include <3ds.h>
+#include <3ds/gpu/enums.h>
+#include <citro3d.h>
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Layout & library limits                                              */
@@ -23,6 +30,44 @@
 #define THUMB_OFFSET_X    5
 #define THUMB_OFFSET_Y    28
 
+/* Horizontal strip: full top screen (no title bar); HUD like reader */
+#define ROW_THUMB_W       191
+#define ROW_THUMB_H       228
+#define ROW_PAD_X         10
+#define ROW_MARGIN_H      8    /* total horizontal margin (split for centering) */
+#define ROW_HUD_PAD_X     6.f
+#define ROW_HUD_PAD_Y     4.f
+#define ROW_HUD_ALPHA     180   /* same as reader page badge */
+#define Z_ROW_BG          0.5f
+#define Z_ROW_SELECTION   0.51f
+#define Z_ROW_IMAGE       0.52f
+#define Z_ROW_HUD_BG      0.55f
+#define Z_ROW_HUD_FG      0.6f
+#define ROW_PRELOAD_LEFT  2     /* indices before first visible */
+#define ROW_PRELOAD_RIGHT 2     /* after last visible index */
+
+/* Book / portrait spread: same rotation & logical sizes as reader */
+#define BOOK_ROT_DEG      90.0f
+#define SER_TOP_PHYS_W    400.0f
+#define SER_TOP_PHYS_H    240.0f
+#define SER_BOT_PHYS_W    320.0f
+#define SER_BOT_PHYS_H    240.0f
+#define SER_TOP_LOG_W     SER_TOP_PHYS_H
+#define SER_TOP_LOG_H     SER_TOP_PHYS_W
+#define SER_BOT_LOG_W     SER_BOT_PHYS_H
+#define SER_BOT_LOG_H     SER_BOT_PHYS_W
+
+#define SER_ZOOM_LEVEL_COUNT 7
+static const float s_series_zoom_levels[SER_ZOOM_LEVEL_COUNT] =
+    { 1.0f, 1.35f, 1.75f, 2.25f, 2.75f, 3.35f, 4.0f };
+
+#define Z_BOOK_PAGE       0.5f
+#define Z_BOOK_SELECTION  0.53f /* left (selected) cover frame — above image */
+#define BOOK_SEL_BORDER   5.f
+#define Z_BOOK_HUD_BG     0.55f
+#define Z_BOOK_HUD_FG     0.6f
+#define Z_BOOK_HINT_BG    0.55f
+
 #define MAX_SERIES_LIST   1024   /* max series per library (RAM ~0.5 MiB) */
 #define FETCH_CHUNK       100    /* items per API request while scanning */
 #define COVER_POOL_SIZE   24     /* GPU textures — rest load on demand */
@@ -35,6 +80,22 @@ static int           s_series_count;
 static int           s_total_count;
 static int           s_selected;
 static int           s_scroll_row;
+static int           s_scroll_first; /* row view: first visible series index */
+
+typedef enum {
+    SERIES_VIEW_GRID,
+    SERIES_VIEW_ROW,
+    SERIES_VIEW_BOOK,
+} SeriesViewMode;
+
+static SeriesViewMode s_view_mode;
+
+/* Book spread: top = series[s_selected], bottom = next or (end) */
+static int           s_book_zoom_i;
+static float         s_book_pan_x[2];
+static float         s_book_pan_y[2];
+static bool          s_book_show_hint;
+static int           s_book_hint_frames;
 
 /* ------------------------------------------------------------------ */
 /* Cover pool: series index -> pool slot; bounded GPU memory            */
@@ -209,13 +270,195 @@ static bool cover_has_texture(int series_idx) {
     return pi >= 0 && pi < COVER_POOL_SIZE && s_cover_valid_pool[pi];
 }
 
+static int row_slots_on_screen(void) {
+    int avail = 400 - ROW_MARGIN_H;
+    int n     = 1;
+    for (int try = 16; try >= 1; try--) {
+        int row_w = try * ROW_THUMB_W + (try - 1) * ROW_PAD_X;
+        if (row_w <= avail) {
+            n = try;
+            break;
+        }
+    }
+    return n;
+}
+
+static float series_book_zoom(void) {
+    return s_series_zoom_levels[s_book_zoom_i];
+}
+
+static void series_book_reset_view(void) {
+    s_book_zoom_i      = 0;
+    s_book_pan_x[0]    = 0.f;
+    s_book_pan_y[0]    = 0.f;
+    s_book_pan_x[1]    = 0.f;
+    s_book_pan_y[1]    = 0.f;
+    s_book_show_hint   = false;
+    s_book_hint_frames = 0;
+}
+
+static void series_book_apply_transform(float phys_w, float phys_h) {
+    float lw = phys_h;
+    float lh = phys_w;
+    C2D_ViewTranslate(phys_w * 0.5f, phys_h * 0.5f);
+    C2D_ViewRotateDegrees(BOOK_ROT_DEG);
+    C2D_ViewTranslate(-lw * 0.5f, -lh * 0.5f);
+}
+
+static void series_clamp_pan_x(float log_w, float log_h, const LoadedTexture* tex,
+                               float zoom, float* pan_x) {
+    if (!tex || !tex->valid)
+        return;
+    float s, sy, ox, oy;
+    image_fit_dims(tex->src_width, tex->src_height,
+                   (int)log_w, (int)log_h, &s, &sy, &ox, &oy);
+    (void)ox;
+    (void)sy;
+    float draw_w = tex->src_width * s * zoom;
+    if (draw_w <= log_w) {
+        *pan_x = 0.f;
+        return;
+    }
+    float lim = (draw_w - log_w) * 0.5f;
+    if (*pan_x > lim)
+        *pan_x = lim;
+    if (*pan_x < -lim)
+        *pan_x = -lim;
+}
+
+static void series_clamp_pan_y(float log_w, float log_h, const LoadedTexture* tex,
+                               float zoom, float* pan_y) {
+    if (!tex || !tex->valid)
+        return;
+    float s, sy, ox, oy;
+    image_fit_dims(tex->src_width, tex->src_height,
+                   (int)log_w, (int)log_h, &s, &sy, &ox, &oy);
+    (void)ox;
+    (void)sy;
+    float draw_h = tex->src_height * s * zoom;
+    if (draw_h <= log_h) {
+        *pan_y = 0.f;
+        return;
+    }
+    float lim = (draw_h - log_h) * 0.5f;
+    if (*pan_y > lim)
+        *pan_y = lim;
+    if (*pan_y < -lim)
+        *pan_y = -lim;
+}
+
+static void series_book_draw_selection_frame(float log_w, float log_h) {
+    const float z = Z_BOOK_SELECTION;
+    const u32   c = COL_ERROR;
+    C2D_DrawRectSolid(0, 0, z, log_w, BOOK_SEL_BORDER, c);
+    C2D_DrawRectSolid(0, log_h - BOOK_SEL_BORDER, z, log_w, BOOK_SEL_BORDER, c);
+    C2D_DrawRectSolid(0, 0, z, BOOK_SEL_BORDER, log_h, c);
+    C2D_DrawRectSolid(log_w - BOOK_SEL_BORDER, 0, z, BOOK_SEL_BORDER, log_h, c);
+}
+
+static void series_draw_portrait_cover_zoom(float log_w, float log_h,
+                                            const LoadedTexture* tex,
+                                            float pan_x, float pan_y,
+                                            float zoom) {
+    if (!tex || !tex->valid)
+        return;
+    float s, sy, ox, oy;
+    image_fit_dims(tex->src_width, tex->src_height,
+                   (int)log_w, (int)log_h, &s, &sy, &ox, &oy);
+    (void)sy;
+    float z     = zoom;
+    float scale = s * z;
+    float draw_w = tex->src_width * scale;
+    float draw_h = tex->src_height * scale;
+    float cx     = (log_w - draw_w) * 0.5f + pan_x;
+    float cy     = (log_h - draw_h) * 0.5f + pan_y;
+    C2D_DrawImageAt(tex->image, cx, cy, Z_BOOK_PAGE, NULL, scale, scale);
+}
+
+static void series_text_centered_z(const char* str, float log_w, float y,
+                                   float scale, u32 color, float z) {
+    C2D_Text t;
+    C2D_TextBufClear(g_text_buf);
+    C2D_TextParse(&t, g_text_buf, str);
+    C2D_TextOptimize(&t);
+    float tw, th;
+    C2D_TextGetDimensions(&t, scale, scale, &tw, &th);
+    (void)th;
+    float dx = (log_w - tw) * 0.5f;
+    if (dx < 0)
+        dx = 0;
+    C2D_DrawText(&t, C2D_WithColor, dx, y, z, scale, scale, color);
+}
+
+static void series_spinner_draw(float cx, float cy, float r, u32 color) {
+    int   segs = 12;
+    float arc  = 120.0f * ((float)M_PI / 180.0f);
+    float base = s_spinner.angle * ((float)M_PI / 180.0f);
+
+    for (int i = 0; i < segs; i++) {
+        float a0 = base + arc * ((float)i / segs);
+        float a1 = base + arc * ((float)(i + 1) / segs);
+        float x0 = cx + cosf(a0) * r;
+        float y0 = cy + sinf(a0) * r;
+        float x1 = cx + cosf(a1) * r;
+        float y1 = cy + sinf(a1) * r;
+        u32 alpha = (u32)(255 * (float)(i + 1) / segs);
+        u32 c     = (color & 0x00ffffff) | (alpha << 24);
+        C2D_DrawLine(x0, y0, c, x1, y1, c, 2.0f, Z_BOOK_PAGE);
+    }
+}
+
+static const LoadedTexture* series_pool_tex(int series_idx) {
+    if (series_idx < 0 || series_idx >= s_series_count)
+        return NULL;
+    int pi = s_series_to_pool[series_idx];
+    if (pi < 0 || pi >= COVER_POOL_SIZE || !s_cover_valid_pool[pi])
+        return NULL;
+    return &s_cover_pool[pi];
+}
+
 static void visible_cell_indices(int* out, int* out_count) {
     *out_count = 0;
-    for (int vr = 0; vr < GRID_VISIBLE_ROWS; vr++) {
-        for (int c = 0; c < GRID_COLS; c++) {
-            int idx = (s_scroll_row + vr) * GRID_COLS + c;
+    if (s_view_mode == SERIES_VIEW_ROW) {
+        int nvis = row_slots_on_screen();
+        for (int j = 0; j < nvis; j++) {
+            int idx = s_scroll_first + j;
+            if (idx < s_series_count && *out_count < 16)
+                out[(*out_count)++] = idx;
+        }
+        for (int k = 0; k < ROW_PRELOAD_RIGHT && *out_count < 16; k++) {
+            int idx = s_scroll_first + nvis + k;
             if (idx < s_series_count)
                 out[(*out_count)++] = idx;
+        }
+        for (int k = 1; k <= ROW_PRELOAD_LEFT && *out_count < 16; k++) {
+            int idx = s_scroll_first - k;
+            if (idx >= 0)
+                out[(*out_count)++] = idx;
+        }
+    } else if (s_view_mode == SERIES_VIEW_BOOK) {
+        for (int j = 0; j < 2; j++) {
+            int idx = s_selected + j;
+            if (idx < s_series_count && *out_count < 16)
+                out[(*out_count)++] = idx;
+        }
+        for (int k = 1; k <= 3 && *out_count < 16; k++) {
+            int idx = s_selected - k;
+            if (idx >= 0)
+                out[(*out_count)++] = idx;
+        }
+        for (int k = 2; k <= 5 && *out_count < 16; k++) {
+            int idx = s_selected + k;
+            if (idx < s_series_count)
+                out[(*out_count)++] = idx;
+        }
+    } else {
+        for (int vr = 0; vr < GRID_VISIBLE_ROWS; vr++) {
+            for (int c = 0; c < GRID_COLS; c++) {
+                int idx = (s_scroll_row + vr) * GRID_COLS + c;
+                if (idx < s_series_count)
+                    out[(*out_count)++] = idx;
+            }
         }
     }
 }
@@ -262,9 +505,23 @@ static int cover_choose_eviction_victim(void) {
         if (on_vis)
             continue;
 
-        int row = o / GRID_COLS, sr = s_selected / GRID_COLS;
-        int col = o % GRID_COLS, sc = s_selected % GRID_COLS;
-        int d   = (row > sr ? row - sr : sr - row) + (col > sc ? col - sc : sc - col);
+        int d;
+        if (s_view_mode == SERIES_VIEW_ROW) {
+            d = o > s_selected ? o - s_selected : s_selected - o;
+        } else if (s_view_mode == SERIES_VIEW_BOOK) {
+            d = o > s_selected ? o - s_selected : s_selected - o;
+            if (s_selected + 1 < s_series_count) {
+                int d1 = o > s_selected + 1 ? o - (s_selected + 1)
+                                            : (s_selected + 1) - o;
+                if (d1 < d)
+                    d = d1;
+            }
+        } else {
+            int row = o / GRID_COLS, sr = s_selected / GRID_COLS;
+            int col = o % GRID_COLS, sc = s_selected % GRID_COLS;
+            d = (row > sr ? row - sr : sr - row) +
+                (col > sc ? col - sc : sc - col);
+        }
         if (best_dist < 0 || d > best_dist) {
             best_dist = d;
             best      = i;
@@ -346,26 +603,44 @@ static void kick_cover_worker(void) {
 /* ------------------------------------------------------------------ */
 static void series_sync_scroll(void) {
     if (s_series_count <= 0 || s_total_count <= 0) {
-        s_scroll_row = 0;
+        s_scroll_row   = 0;
+        s_scroll_first = 0;
         return;
     }
     int slot = s_selected;
     if (slot < 0 || slot >= s_series_count)
         return;
-    int row = slot / GRID_COLS;
-    if (row < s_scroll_row)
-        s_scroll_row = row;
-    if (row >= s_scroll_row + GRID_VISIBLE_ROWS)
-        s_scroll_row = row - GRID_VISIBLE_ROWS + 1;
 
-    int rows_in_page = (s_series_count + GRID_COLS - 1) / GRID_COLS;
-    int max_scroll   = rows_in_page > GRID_VISIBLE_ROWS
-                           ? rows_in_page - GRID_VISIBLE_ROWS
-                           : 0;
-    if (s_scroll_row > max_scroll)
-        s_scroll_row = max_scroll;
-    if (s_scroll_row < 0)
-        s_scroll_row = 0;
+    if (s_view_mode == SERIES_VIEW_ROW) {
+        int nvis = row_slots_on_screen();
+        if (slot < s_scroll_first)
+            s_scroll_first = slot;
+        if (slot >= s_scroll_first + nvis)
+            s_scroll_first = slot - nvis + 1;
+
+        int max_first = s_series_count - nvis;
+        if (max_first < 0)
+            max_first = 0;
+        if (s_scroll_first > max_first)
+            s_scroll_first = max_first;
+        if (s_scroll_first < 0)
+            s_scroll_first = 0;
+    } else {
+        int row = slot / GRID_COLS;
+        if (row < s_scroll_row)
+            s_scroll_row = row;
+        if (row >= s_scroll_row + GRID_VISIBLE_ROWS)
+            s_scroll_row = row - GRID_VISIBLE_ROWS + 1;
+
+        int rows_in_page = (s_series_count + GRID_COLS - 1) / GRID_COLS;
+        int max_scroll   = rows_in_page > GRID_VISIBLE_ROWS
+                               ? rows_in_page - GRID_VISIBLE_ROWS
+                               : 0;
+        if (s_scroll_row > max_scroll)
+            s_scroll_row = max_scroll;
+        if (s_scroll_row < 0)
+            s_scroll_row = 0;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -376,6 +651,9 @@ void screen_series_init(void) {
     s_total_count  = 0;
     s_selected     = 0;
     s_scroll_row   = 0;
+    s_scroll_first = 0;
+    s_view_mode    = SERIES_VIEW_GRID;
+    series_book_reset_view();
     s_state        = STATE_LOADING_LIST;
     s_list_done    = false;
     s_cover_thread = NULL;
@@ -452,6 +730,9 @@ void screen_series_tick(void) {
             }
             kick_cover_worker();
 
+            if (s_view_mode == SERIES_VIEW_BOOK)
+                ui_spinner_tick(&s_spinner);
+
             {
                 u32 kd = hidKeysDown();
 
@@ -471,22 +752,87 @@ void screen_series_tick(void) {
                     }
                 }
 
-                if (kd & KEY_RIGHT) {
-                    if (s_selected % GRID_COLS < GRID_COLS - 1 &&
-                        s_selected + 1 < s_series_count) {
-                        s_selected++;
+                if (kd & KEY_Y) {
+                    if (s_view_mode == SERIES_VIEW_GRID)
+                        s_view_mode = SERIES_VIEW_ROW;
+                    else if (s_view_mode == SERIES_VIEW_ROW) {
+                        s_view_mode = SERIES_VIEW_BOOK;
+                        series_book_reset_view();
+                    } else
+                        s_view_mode = SERIES_VIEW_GRID;
+                    series_sync_scroll();
+                }
+
+                if (s_view_mode == SERIES_VIEW_BOOK) {
+                    float zz = series_book_zoom();
+                    if (kd & KEY_X) {
+                        s_book_show_hint  = true;
+                        s_book_hint_frames = 180;
                     }
-                }
-                if (kd & KEY_LEFT) {
-                    if (s_selected % GRID_COLS > 0) s_selected--;
-                }
-                if (kd & KEY_DOWN) {
-                    int next = s_selected + GRID_COLS;
-                    if (next < s_series_count) s_selected = next;
-                }
-                if (kd & KEY_UP) {
-                    int prev = s_selected - GRID_COLS;
-                    if (prev >= 0) s_selected = prev;
+                    if (kd & KEY_DRIGHT && s_book_zoom_i < SER_ZOOM_LEVEL_COUNT - 1) {
+                        s_book_zoom_i++;
+                        s_book_pan_x[0] = s_book_pan_y[0] = 0.f;
+                        s_book_pan_x[1] = s_book_pan_y[1] = 0.f;
+                    }
+                    if (kd & KEY_DLEFT && s_book_zoom_i > 0) {
+                        s_book_zoom_i--;
+                        s_book_pan_x[0] = s_book_pan_y[0] = 0.f;
+                        s_book_pan_x[1] = s_book_pan_y[1] = 0.f;
+                    }
+                    {
+                        int sel_before = s_selected;
+                        if (kd & KEY_DUP && s_selected > 0)
+                            s_selected--;
+                        if (kd & KEY_DDOWN && s_selected + 1 < s_series_count)
+                            s_selected++;
+                        if (s_selected != sel_before) {
+                            s_book_pan_x[0] = s_book_pan_y[0] = 0.f;
+                            s_book_pan_x[1] = s_book_pan_y[1] = 0.f;
+                        }
+                    }
+
+                    if (zz > 1.0005f) {
+                        circlePosition cir;
+                        hidCircleRead(&cir);
+                        float dx = (float)cir.dx;
+                        if (dx < -14.f || dx > 14.f) {
+                            float adj = dx * 0.2f;
+                            s_book_pan_y[0] += adj;
+                            s_book_pan_y[1] += adj;
+                        }
+                        float dy = (float)cir.dy;
+                        if (dy < -14.f || dy > 14.f) {
+                            float adj = dy * 0.2f;
+                            s_book_pan_x[0] += adj;
+                            s_book_pan_x[1] += adj;
+                        }
+                    }
+                } else if (s_view_mode == SERIES_VIEW_ROW) {
+                    if (kd & KEY_RIGHT && s_selected + 1 < s_series_count)
+                        s_selected++;
+                    if (kd & KEY_LEFT && s_selected > 0)
+                        s_selected--;
+                } else {
+                    if (kd & KEY_RIGHT) {
+                        if (s_selected % GRID_COLS < GRID_COLS - 1 &&
+                            s_selected + 1 < s_series_count) {
+                            s_selected++;
+                        }
+                    }
+                    if (kd & KEY_LEFT) {
+                        if (s_selected % GRID_COLS > 0)
+                            s_selected--;
+                    }
+                    if (kd & KEY_DOWN) {
+                        int next = s_selected + GRID_COLS;
+                        if (next < s_series_count)
+                            s_selected = next;
+                    }
+                    if (kd & KEY_UP) {
+                        int prev = s_selected - GRID_COLS;
+                        if (prev >= 0)
+                            s_selected = prev;
+                    }
                 }
 
                 series_sync_scroll();
@@ -495,6 +841,31 @@ void screen_series_tick(void) {
                     touchPosition tp;
                     hidTouchRead(&tp);
                     (void)tp;
+                }
+            }
+
+            if (s_view_mode == SERIES_VIEW_BOOK) {
+                if (s_book_show_hint && s_book_hint_frames > 0)
+                    s_book_hint_frames--;
+                else
+                    s_book_show_hint = false;
+
+                float zz = series_book_zoom();
+                const LoadedTexture* t0 = series_pool_tex(s_selected);
+                if (t0 && t0->valid) {
+                    series_clamp_pan_x(SER_TOP_LOG_W, SER_TOP_LOG_H, t0, zz,
+                                       &s_book_pan_x[0]);
+                    series_clamp_pan_y(SER_TOP_LOG_W, SER_TOP_LOG_H, t0, zz,
+                                       &s_book_pan_y[0]);
+                }
+                if (s_selected + 1 < s_series_count) {
+                    const LoadedTexture* t1 = series_pool_tex(s_selected + 1);
+                    if (t1 && t1->valid) {
+                        series_clamp_pan_x(SER_BOT_LOG_W, SER_BOT_LOG_H, t1, zz,
+                                           &s_book_pan_x[1]);
+                        series_clamp_pan_y(SER_BOT_LOG_W, SER_BOT_LOG_H, t1, zz,
+                                           &s_book_pan_y[1]);
+                    }
                 }
             }
             break;
@@ -510,20 +881,29 @@ void screen_series_tick(void) {
     /* --- Render: Top screen --- */
     C2D_SceneBegin(g_target_top);
 
-    C2D_DrawRectSolid(0, 0, 0.5f, 400, 24, COL_PANEL);
-    ui_text_truncated(g_target_top, g_app.selected_library_name,
-                       8, 4, 320, FONT_MED, COL_WHITE);
+    const bool row_immersive =
+        (s_state == STATE_READY && s_view_mode == SERIES_VIEW_ROW);
+    const bool book_top =
+        (s_state == STATE_READY && s_view_mode == SERIES_VIEW_BOOK);
 
-    if (s_total_count > 0 && s_state != STATE_LOADING_LIST) {
-        char pos[40];
-        snprintf(pos, sizeof(pos), "%d / %d", s_selected + 1, s_total_count);
-        C2D_Text t;
-        C2D_TextParse(&t, g_text_buf, pos);
-        C2D_TextOptimize(&t);
-        float tw2, th2;
-        C2D_TextGetDimensions(&t, FONT_SMALL, FONT_SMALL, &tw2, &th2);
-        C2D_DrawText(&t, C2D_WithColor, 392 - tw2, 4, 0.5f,
-                     FONT_SMALL, FONT_SMALL, COL_GREY);
+    if (row_immersive) {
+        C2D_DrawRectSolid(0, 0, Z_ROW_BG, 400, 240, COL_BG_TOP);
+    } else if (!book_top) {
+        C2D_DrawRectSolid(0, 0, 0.5f, 400, 24, COL_PANEL);
+        ui_text_truncated(g_target_top, g_app.selected_library_name,
+                           8, 4, 320, FONT_MED, COL_WHITE);
+
+        if (s_total_count > 0 && s_state != STATE_LOADING_LIST) {
+            char pos[40];
+            snprintf(pos, sizeof(pos), "%d / %d", s_selected + 1, s_total_count);
+            C2D_Text t;
+            C2D_TextParse(&t, g_text_buf, pos);
+            C2D_TextOptimize(&t);
+            float tw2, th2;
+            C2D_TextGetDimensions(&t, FONT_SMALL, FONT_SMALL, &tw2, &th2);
+            C2D_DrawText(&t, C2D_WithColor, 392 - tw2, 4, 0.5f,
+                         FONT_SMALL, FONT_SMALL, COL_GREY);
+        }
     }
 
     if (s_state == STATE_LOADING_LIST) {
@@ -534,6 +914,134 @@ void screen_series_tick(void) {
     } else if (s_state == STATE_ERROR) {
         ui_text_centered(g_target_top, s_error_msg, 0, 400, 110,
                          FONT_MED, COL_ERROR);
+    } else if (s_view_mode == SERIES_VIEW_BOOK) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0,
+                       (u32)SER_TOP_LOG_W, (u32)SER_TOP_LOG_H);
+        {
+            C3D_Mtx save;
+            C2D_ViewSave(&save);
+            series_book_apply_transform(SER_TOP_PHYS_W, SER_TOP_PHYS_H);
+
+            C2D_DrawRectSolid(0, 0, Z_BOOK_PAGE, SER_TOP_LOG_W, SER_TOP_LOG_H,
+                              COL_BG_TOP);
+
+            const LoadedTexture* tex = series_pool_tex(s_selected);
+            if (tex && tex->valid) {
+                series_draw_portrait_cover_zoom(
+                    SER_TOP_LOG_W, SER_TOP_LOG_H, tex,
+                    s_book_pan_x[0], s_book_pan_y[0], series_book_zoom());
+            } else {
+                C2D_DrawRectSolid(0, 0, Z_BOOK_PAGE, SER_TOP_LOG_W,
+                                   SER_TOP_LOG_H, COL_ACCENT2);
+                if (s_cover_fetch_idx == s_selected && !s_cover_thread_done) {
+                    series_spinner_draw(SER_TOP_LOG_W * 0.5f,
+                                        SER_TOP_LOG_H * 0.5f, 28.f, COL_ACCENT);
+                }
+            }
+
+            series_book_draw_selection_frame(SER_TOP_LOG_W, SER_TOP_LOG_H);
+
+            if (s_total_count > 0) {
+                char pg[40];
+                snprintf(pg, sizeof(pg), "%d/%d",
+                         s_selected + 1, s_total_count);
+                C2D_Text t;
+                C2D_TextBufClear(g_text_buf);
+                C2D_TextParse(&t, g_text_buf, pg);
+                C2D_TextOptimize(&t);
+                float twb, thb;
+                C2D_TextGetDimensions(&t, FONT_TINY, FONT_TINY, &twb, &thb);
+                float bg_w = twb + ROW_HUD_PAD_X * 2.f;
+                float bg_h = thb + ROW_HUD_PAD_Y * 2.f;
+                float bg_x = SER_TOP_LOG_W - 4.f - bg_w;
+                float bg_y = 4.f;
+                C2D_DrawRectSolid(bg_x, bg_y, Z_BOOK_HUD_BG, bg_w, bg_h,
+                                  C2D_Color32(0, 0, 0, ROW_HUD_ALPHA));
+                C2D_DrawText(&t, C2D_WithColor,
+                             bg_x + ROW_HUD_PAD_X, bg_y + ROW_HUD_PAD_Y,
+                             Z_BOOK_HUD_FG, FONT_TINY, FONT_TINY, COL_WHITE);
+                if (series_book_zoom() > 1.001f) {
+                    char zb[16];
+                    snprintf(zb, sizeof(zb), "%.2gx", series_book_zoom());
+                    C2D_TextBufClear(g_text_buf);
+                    C2D_TextParse(&t, g_text_buf, zb);
+                    C2D_TextOptimize(&t);
+                    C2D_DrawText(&t, C2D_WithColor,
+                                 bg_x + ROW_HUD_PAD_X,
+                                 bg_y + ROW_HUD_PAD_Y + thb + 2.f,
+                                 Z_BOOK_HUD_FG, FONT_TINY, FONT_TINY, COL_GREY);
+                }
+            }
+
+            C2D_ViewRestore(&save);
+        }
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 400, 240);
+    } else if (s_view_mode == SERIES_VIEW_ROW) {
+        int nvis = row_slots_on_screen();
+        int row_cy = (240 - ROW_THUMB_H) / 2;
+        if (row_cy < 0)
+            row_cy = 0;
+
+        float row_w =
+            (float)nvis * ROW_THUMB_W + (float)(nvis - 1) * ROW_PAD_X;
+        float base_cx = (400.0f - row_w) * 0.5f;
+        float step    = (float)(ROW_THUMB_W + ROW_PAD_X);
+
+        for (int j = 0; j < nvis; j++) {
+            int slot = s_scroll_first + j;
+            if (slot >= s_series_count)
+                break;
+
+            float cx = base_cx + j * step;
+            float cy = (float)row_cy;
+
+            if (slot == s_selected) {
+                C2D_DrawRectSolid(cx - 2, cy - 2, Z_ROW_SELECTION,
+                                   ROW_THUMB_W + 4, ROW_THUMB_H + 4,
+                                   COL_ACCENT);
+            }
+
+            int pi = s_series_to_pool[slot];
+            if (pi >= 0 && pi < COVER_POOL_SIZE && s_cover_valid_pool[pi]) {
+                float sx, sy, ox, oy;
+                image_fit_dims(s_cover_pool[pi].src_width,
+                               s_cover_pool[pi].src_height,
+                               ROW_THUMB_W, ROW_THUMB_H,
+                               &sx, &sy, &ox, &oy);
+                C2D_DrawImageAt(s_cover_pool[pi].image,
+                                cx + ox, cy + oy, Z_ROW_IMAGE, NULL, sx, sy);
+            } else {
+                C2D_DrawRectSolid(cx, cy, Z_ROW_IMAGE, ROW_THUMB_W, ROW_THUMB_H,
+                                   COL_ACCENT2);
+                if (s_cover_fetch_idx == slot && !s_cover_thread_done) {
+                    ui_spinner_tick(&s_spinner);
+                    ui_spinner(g_target_top, &s_spinner,
+                               cx + ROW_THUMB_W / 2, cy + ROW_THUMB_H / 2, 10,
+                               COL_GREY);
+                }
+            }
+        }
+
+        if (s_total_count > 0) {
+            char pos[40];
+            snprintf(pos, sizeof(pos), "%d/%d", s_selected + 1, s_total_count);
+            C2D_Text t;
+            C2D_TextBufClear(g_text_buf);
+            C2D_TextParse(&t, g_text_buf, pos);
+            C2D_TextOptimize(&t);
+            float twb, thb;
+            C2D_TextGetDimensions(&t, FONT_TINY, FONT_TINY, &twb, &thb);
+            float bg_w = twb + ROW_HUD_PAD_X * 2.f;
+            float bg_h = thb + ROW_HUD_PAD_Y * 2.f;
+            float bg_x = 400.f - 4.f - bg_w;
+            float bg_y = 4.f;
+            C2D_DrawRectSolid(bg_x, bg_y, Z_ROW_HUD_BG, bg_w, bg_h,
+                              C2D_Color32(0, 0, 0, ROW_HUD_ALPHA));
+            C2D_DrawText(&t, C2D_WithColor,
+                         bg_x + ROW_HUD_PAD_X, bg_y + ROW_HUD_PAD_Y,
+                         Z_ROW_HUD_FG,
+                         FONT_TINY, FONT_TINY, COL_WHITE);
+        }
     } else {
         for (int vr = 0; vr < GRID_VISIBLE_ROWS; vr++) {
             for (int col = 0; col < GRID_COLS; col++) {
@@ -578,44 +1086,150 @@ void screen_series_tick(void) {
 
     /* --- Render: Bottom screen --- */
     C2D_SceneBegin(g_target_bottom);
-    C2D_DrawRectSolid(0, 0, 0.5f, 320, 240, COL_BG_BOTTOM);
 
-    if (s_state == STATE_ERROR) {
-        ui_text_centered(g_target_bottom, s_error_msg,
-                          0, 320, 80, FONT_MED, COL_ERROR);
-        ui_text_centered(g_target_bottom, "B: Back",
-                          0, 320, 120, FONT_MED, COL_WHITE);
-    } else if (s_state == STATE_LOADING_LIST) {
-        ui_text_centered(g_target_bottom, "Loading series...",
-                          0, 320, 110, FONT_MED, COL_GREY);
-        ui_text_centered(g_target_bottom, "B: Back",
-                          0, 320, 140, FONT_MED, COL_WHITE);
-    } else if (s_series_count > 0 && s_total_count > 0) {
-        if (s_selected >= 0 && s_selected < s_series_count) {
-            ui_text_centered(g_target_bottom,
-                              s_series[s_selected].name,
-                              0, 320, 10, FONT_MED, COL_ACCENT);
+    if (s_state == STATE_READY && s_view_mode == SERIES_VIEW_BOOK) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0,
+                       (u32)SER_BOT_LOG_W, (u32)SER_BOT_LOG_H);
+        {
+            C3D_Mtx save;
+            C2D_ViewSave(&save);
+            series_book_apply_transform(SER_BOT_PHYS_W, SER_BOT_PHYS_H);
 
-            int pr = s_series[s_selected].pages_read;
-            int pt = s_series[s_selected].pages_total;
-            if (pt > 0) {
-                char prog_str[64];
-                snprintf(prog_str, sizeof(prog_str), "%d / %d pages", pr, pt);
-                ui_text_centered(g_target_bottom, prog_str,
-                                  0, 320, 32, FONT_SMALL, COL_GREY);
-                ui_progress_bar(g_target_bottom, 20, 50, 280, 10,
-                                 (float)pr / pt, COL_ACCENT, COL_ACCENT2);
+            C2D_DrawRectSolid(0, 0, Z_BOOK_PAGE, SER_BOT_LOG_W, SER_BOT_LOG_H,
+                              COL_BG_TOP);
+
+            if (s_selected + 1 < s_series_count) {
+                int idx1 = s_selected + 1;
+                const LoadedTexture* tex = series_pool_tex(idx1);
+                if (tex && tex->valid) {
+                    series_draw_portrait_cover_zoom(
+                        SER_BOT_LOG_W, SER_BOT_LOG_H, tex,
+                        s_book_pan_x[1], s_book_pan_y[1], series_book_zoom());
+                } else {
+                    C2D_DrawRectSolid(0, 0, Z_BOOK_PAGE, SER_BOT_LOG_W,
+                                       SER_BOT_LOG_H, COL_ACCENT2);
+                    if (s_cover_fetch_idx == idx1 && !s_cover_thread_done) {
+                        series_spinner_draw(SER_BOT_LOG_W * 0.5f,
+                                            SER_BOT_LOG_H * 0.5f, 24.f,
+                                            COL_ACCENT);
+                    }
+                }
+
+                if (s_total_count > 0) {
+                    char pg2[40];
+                    snprintf(pg2, sizeof(pg2), "%d/%d",
+                             s_selected + 2, s_total_count);
+                    C2D_Text t;
+                    C2D_TextBufClear(g_text_buf);
+                    C2D_TextParse(&t, g_text_buf, pg2);
+                    C2D_TextOptimize(&t);
+                    float twb, thb;
+                    C2D_TextGetDimensions(&t, FONT_TINY, FONT_TINY, &twb, &thb);
+                    float bg_w = twb + ROW_HUD_PAD_X * 2.f;
+                    float bg_h = thb + ROW_HUD_PAD_Y * 2.f;
+                    float bg_x = SER_BOT_LOG_W - 4.f - bg_w;
+                    float bg_y = 4.f;
+                    C2D_DrawRectSolid(bg_x, bg_y, Z_BOOK_HUD_BG, bg_w, bg_h,
+                                      C2D_Color32(0, 0, 0, ROW_HUD_ALPHA));
+                    C2D_DrawText(&t, C2D_WithColor,
+                                 bg_x + ROW_HUD_PAD_X, bg_y + ROW_HUD_PAD_Y,
+                                 Z_BOOK_HUD_FG, FONT_TINY, FONT_TINY,
+                                 COL_WHITE);
+                    if (series_book_zoom() > 1.001f) {
+                        char zb[16];
+                        snprintf(zb, sizeof(zb), "%.2gx", series_book_zoom());
+                        C2D_TextBufClear(g_text_buf);
+                        C2D_TextParse(&t, g_text_buf, zb);
+                        C2D_TextOptimize(&t);
+                        C2D_DrawText(&t, C2D_WithColor,
+                                     bg_x + ROW_HUD_PAD_X,
+                                     bg_y + ROW_HUD_PAD_Y + thb + 2.f,
+                                     Z_BOOK_HUD_FG, FONT_TINY, FONT_TINY,
+                                     COL_GREY);
+                    }
+                }
+            } else {
+                C2D_DrawRectSolid(0, 0, Z_BOOK_PAGE, SER_BOT_LOG_W,
+                                   SER_BOT_LOG_H, COL_DARK);
+                series_text_centered_z("(end)", SER_BOT_LOG_W,
+                                        SER_BOT_LOG_H * 0.5f - 10.f,
+                                        FONT_SMALL, COL_GREY, Z_BOOK_PAGE);
             }
-        }
 
-        ui_text_centered(g_target_bottom, "D-Pad: Navigate (scrolls)",
-                          0, 320, 150, FONT_SMALL, COL_GREY);
-        ui_text_centered(g_target_bottom, "A: Open  B: Back",
-                          0, 320, 168, FONT_SMALL, COL_GREY);
-    } else if (s_state == STATE_READY) {
-        ui_text_centered(g_target_bottom, "No series found",
-                          0, 320, 110, FONT_MED, COL_GREY);
-        ui_text_centered(g_target_bottom, "B: Back",
-                          0, 320, 140, FONT_MED, COL_WHITE);
+            if (s_book_show_hint) {
+                const float hint_top  = SER_BOT_LOG_H - 92.f;
+                const float hint_h    = 86.f;
+                const float line_y0   = SER_BOT_LOG_H - 84.f;
+                const float line_step = 15.f;
+                C2D_DrawRectSolid(8, hint_top, Z_BOOK_HINT_BG,
+                                   SER_BOT_LOG_W - 16, hint_h,
+                                   C2D_Color32(0, 0, 0, 200));
+                series_text_centered_z("D-Pad L/R: Zoom",
+                                        SER_BOT_LOG_W, line_y0, FONT_TINY,
+                                        COL_WHITE, Z_BOOK_HUD_FG);
+                series_text_centered_z("D-Pad Up/Down: Previous / Next",
+                                        SER_BOT_LOG_W, line_y0 + line_step,
+                                        FONT_TINY, COL_GREY, Z_BOOK_HUD_FG);
+                series_text_centered_z("Circle Pad: Pan when zoomed",
+                                        SER_BOT_LOG_W,
+                                        line_y0 + 2.f * line_step, FONT_TINY,
+                                        COL_GREY, Z_BOOK_HUD_FG);
+                series_text_centered_z("A: Open  B: Back  Y: View  X: Help",
+                                        SER_BOT_LOG_W,
+                                        line_y0 + 3.f * line_step, FONT_TINY,
+                                        COL_GREY, Z_BOOK_HUD_FG);
+            }
+
+            C2D_ViewRestore(&save);
+        }
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 320, 240);
+    } else {
+        C2D_DrawRectSolid(0, 0, 0.5f, 320, 240, COL_BG_BOTTOM);
+
+        if (s_state == STATE_ERROR) {
+            ui_text_centered(g_target_bottom, s_error_msg,
+                              0, 320, 80, FONT_MED, COL_ERROR);
+            ui_text_centered(g_target_bottom, "B: Back",
+                              0, 320, 120, FONT_MED, COL_WHITE);
+        } else if (s_state == STATE_LOADING_LIST) {
+            ui_text_centered(g_target_bottom, "Loading series...",
+                              0, 320, 110, FONT_MED, COL_GREY);
+            ui_text_centered(g_target_bottom, "B: Back",
+                              0, 320, 140, FONT_MED, COL_WHITE);
+        } else if (s_series_count > 0 && s_total_count > 0) {
+            if (s_selected >= 0 && s_selected < s_series_count) {
+                ui_text_centered(g_target_bottom,
+                                  s_series[s_selected].name,
+                                  0, 320, 10, FONT_MED, COL_ACCENT);
+
+                int pr = s_series[s_selected].pages_read;
+                int pt = s_series[s_selected].pages_total;
+                if (pt > 0) {
+                    char prog_str[64];
+                    snprintf(prog_str, sizeof(prog_str), "%d / %d pages", pr, pt);
+                    ui_text_centered(g_target_bottom, prog_str,
+                                      0, 320, 32, FONT_SMALL, COL_GREY);
+                    ui_progress_bar(g_target_bottom, 20, 50, 280, 10,
+                                     (float)pr / pt, COL_ACCENT, COL_ACCENT2);
+                }
+            }
+
+            if (s_view_mode == SERIES_VIEW_ROW) {
+                ui_text_centered(g_target_bottom,
+                                  "Left/Right: Browse (scrolls)",
+                                  0, 320, 150, FONT_SMALL, COL_GREY);
+            } else {
+                ui_text_centered(g_target_bottom, "D-Pad: Navigate (scrolls)",
+                                  0, 320, 150, FONT_SMALL, COL_GREY);
+            }
+            ui_text_centered(g_target_bottom,
+                              "A: Open  B: Back  Y: View",
+                              0, 320, 168, FONT_SMALL, COL_GREY);
+        } else if (s_state == STATE_READY) {
+            ui_text_centered(g_target_bottom, "No series found",
+                              0, 320, 110, FONT_MED, COL_GREY);
+            ui_text_centered(g_target_bottom, "B: Back",
+                              0, 320, 140, FONT_MED, COL_WHITE);
+        }
     }
 }
