@@ -1,5 +1,6 @@
 #include "screen_series.h"
 #include "app.h"
+#include "cover_cache.h"
 #include "kavita_api.h"
 #include "image_loader.h"
 #include "http_client.h"
@@ -133,16 +134,38 @@ static void cover_fetch_thread(void* arg) {
     kavita_cover_url(g_app.base_url, g_app.api_key,
                      s_series[series_idx].id, url, sizeof(url));
 
-    HttpResponse* resp = http_get(url, g_app.token);
-    if (!resp || resp->status_code != 200) {
+    PreparedTexture prep;
+    memset(&prep, 0, sizeof(prep));
+    bool ok = false;
+
+    if (g_app.cover_cache) {
+        u8* cached = NULL;
+        size_t csz = 0;
+        if (cover_cache_read(g_app.base_url, 's', s_series[series_idx].id,
+                             &cached, &csz)) {
+            ok = image_prepare_from_mem(cached, csz, &prep);
+            free(cached);
+        }
+    }
+
+    if (!ok) {
+        HttpResponse* resp = http_get_binary(url, g_app.token);
+        if (!resp || resp->status_code != 200) {
+            http_response_free(resp);
+            s_cover_thread_done = true;
+            threadExit(0);
+        }
+        ok = image_prepare_from_mem((const u8*)resp->data, resp->size, &prep);
+        if (ok && g_app.cover_cache)
+            cover_cache_write(g_app.base_url, 's', s_series[series_idx].id,
+                              (const u8*)resp->data, resp->size);
         http_response_free(resp);
+    }
+
+    if (!ok) {
         s_cover_thread_done = true;
         threadExit(0);
     }
-
-    PreparedTexture prep;
-    bool ok = image_prepare_from_mem((const u8*)resp->data, resp->size, &prep);
-    http_response_free(resp);
 
     if (ok) {
         s_pending_prep        = prep;

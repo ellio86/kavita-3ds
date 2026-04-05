@@ -2,6 +2,7 @@
 #include "config.h"
 #include "screen_setup.h"
 #include "screen_libraries.h"
+#include "screen_settings.h"
 #include "screen_series.h"
 #include "screen_detail.h"
 #include "screen_reader.h"
@@ -20,6 +21,7 @@ static void screen_init(AppScreen s) {
     switch (s) {
         case SCREEN_SETUP:      screen_setup_init();     break;
         case SCREEN_LIBRARIES:  screen_libraries_init(); break;
+        case SCREEN_SETTINGS:   screen_settings_init();  break;
         case SCREEN_SERIES:     screen_series_init();    break;
         case SCREEN_DETAIL:     screen_detail_init();    break;
         case SCREEN_READER:     screen_reader_init();    break;
@@ -30,6 +32,7 @@ static void screen_fini(AppScreen s) {
     switch (s) {
         case SCREEN_SETUP:      screen_setup_fini();     break;
         case SCREEN_LIBRARIES:  screen_libraries_fini(); break;
+        case SCREEN_SETTINGS:   screen_settings_fini();  break;
         case SCREEN_SERIES:     screen_series_fini();    break;
         case SCREEN_DETAIL:     screen_detail_fini();    break;
         case SCREEN_READER:     screen_reader_fini();    break;
@@ -40,6 +43,7 @@ static void screen_tick(AppScreen s) {
     switch (s) {
         case SCREEN_SETUP:      screen_setup_tick();     break;
         case SCREEN_LIBRARIES:  screen_libraries_tick(); break;
+        case SCREEN_SETTINGS:   screen_settings_tick();  break;
         case SCREEN_SERIES:     screen_series_tick();    break;
         case SCREEN_DETAIL:     screen_detail_tick();    break;
         case SCREEN_READER:     screen_reader_tick();    break;
@@ -58,6 +62,7 @@ void app_init(void) {
         strncpy(g_app.base_url,  cfg.base_url,  sizeof(g_app.base_url)  - 1);
         strncpy(g_app.username,  cfg.username,  sizeof(g_app.username)  - 1);
         strncpy(g_app.password,  cfg.password,  sizeof(g_app.password)  - 1);
+        g_app.cover_cache = cfg.cover_cache;
         /* Start on setup screen regardless — user must connect (tap or A) to login */
     }
 
@@ -78,4 +83,14 @@ void app_transition(AppScreen next) {
     screen_fini(g_app.current_screen);
     g_app.current_screen = next;
     screen_init(next);
+}
+
+void app_save_config(void) {
+    Config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    strncpy(cfg.base_url,  g_app.base_url,  sizeof(cfg.base_url)  - 1);
+    strncpy(cfg.username,  g_app.username,  sizeof(cfg.username)  - 1);
+    strncpy(cfg.password,  g_app.password,  sizeof(cfg.password)  - 1);
+    cfg.cover_cache = g_app.cover_cache;
+    config_save(&cfg);
 }

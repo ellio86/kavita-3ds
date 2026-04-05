@@ -10,6 +10,7 @@
 typedef enum {
     SCREEN_SETUP,
     SCREEN_LIBRARIES,
+    SCREEN_SETTINGS,
     SCREEN_SERIES,
     SCREEN_DETAIL,
     SCREEN_READER,
@@ -43,6 +44,9 @@ typedef struct {
 
     /* Set to true to request app exit from any screen */
     bool exit_requested;
+
+    /* Persisted via config.ini (see config_save / app_save_config) */
+    bool cover_cache;
 } AppState;
 
 extern AppState g_app;
@@ -61,3 +65,6 @@ void app_init(void);
 void app_fini(void);
 void app_tick(void);               /* called once per frame */
 void app_transition(AppScreen next); /* change screen, calls fini/init */
+
+/* Writes base_url, username, password_enc, cover_cache to SD config. */
+void app_save_config(void);

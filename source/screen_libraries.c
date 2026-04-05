@@ -93,6 +93,11 @@ void screen_libraries_tick(void) {
             return;
         }
 
+        if (kd & KEY_X) {
+            app_transition(SCREEN_SETTINGS);
+            return;
+        }
+
         /* Logout: go back to setup */
         if (kd & KEY_SELECT) {
             memset(g_app.token,   0, sizeof(g_app.token));
@@ -173,14 +178,16 @@ void screen_libraries_tick(void) {
                           0, 320, 80, FONT_SMALL, COL_GREY);
         ui_text_centered(g_target_bottom, "A: Open Library",
                           0, 320, 100, FONT_SMALL, COL_GREY);
-        ui_text_centered(g_target_bottom, "SELECT: Logout",
+        ui_text_centered(g_target_bottom, "X: Settings",
                           0, 320, 120, FONT_SMALL, COL_GREY);
+        ui_text_centered(g_target_bottom, "SELECT: Logout",
+                          0, 320, 140, FONT_SMALL, COL_GREY);
 
         if (s_lib_count > 0) {
             char sel_str[256];
             snprintf(sel_str, sizeof(sel_str), "%s", s_libs[s_selected].name);
             ui_text_centered(g_target_bottom, sel_str,
-                              0, 320, 160, FONT_MED, COL_ACCENT);
+                              0, 320, 172, FONT_MED, COL_ACCENT);
         }
     }
 

@@ -11,6 +11,7 @@ typedef struct {
     char base_url[256];
     char username[64];
     char password[64];    /* in-memory only; on disk as password_enc= */
+    bool cover_cache;       /* cache series/volume/chapter covers on SD */
 } Config;
 
 bool config_load(Config* out);

@@ -113,6 +113,7 @@ screen_series.o: \
  C:/devkitPro/libctru/include/c2d/sprite.h \
  C:/devkitPro/libctru/include/c2d/text.h \
  C:/devkitPro/libctru/include/c2d/font.h \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/cover_cache.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h \
@@ -230,6 +231,7 @@ C:/devkitPro/libctru/include/c2d/spritesheet.h:
 C:/devkitPro/libctru/include/c2d/sprite.h:
 C:/devkitPro/libctru/include/c2d/text.h:
 C:/devkitPro/libctru/include/c2d/font.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/cover_cache.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h:

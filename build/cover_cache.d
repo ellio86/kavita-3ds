@@ -1,7 +1,6 @@
-screen_setup.o: \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/source/screen_setup.c \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_setup.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h \
+cover_cache.o: \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/source/cover_cache.c \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/cover_cache.h \
  C:/devkitPro/libctru/include/3ds.h \
  C:/devkitPro/libctru/include/3ds/types.h \
  C:/devkitPro/libctru/include/3ds/result.h \
@@ -89,35 +88,8 @@ screen_setup.o: \
  C:/devkitPro/libctru/include/3ds/font.h \
  C:/devkitPro/libctru/include/3ds/gdbhio_dev.h \
  C:/devkitPro/libctru/include/3ds/3dslink.h \
- C:/devkitPro/libctru/include/citro2d.h \
- C:/devkitPro/libctru/include/citro3d.h \
- C:/devkitPro/libctru/include/c3d/types.h \
- C:/devkitPro/libctru/include/c3d/maths.h \
- C:/devkitPro/libctru/include/c3d/mtxstack.h \
- C:/devkitPro/libctru/include/c3d/uniforms.h \
- C:/devkitPro/libctru/include/c3d/attribs.h \
- C:/devkitPro/libctru/include/c3d/buffers.h \
- C:/devkitPro/libctru/include/c3d/base.h \
- C:/devkitPro/libctru/include/c3d/texenv.h \
- C:/devkitPro/libctru/include/c3d/effect.h \
- C:/devkitPro/libctru/include/c3d/texture.h \
- C:/devkitPro/libctru/include/c3d/proctex.h \
- C:/devkitPro/libctru/include/c3d/light.h \
- C:/devkitPro/libctru/include/c3d/lightlut.h \
- C:/devkitPro/libctru/include/c3d/fog.h \
- C:/devkitPro/libctru/include/c3d/framebuffer.h \
- C:/devkitPro/libctru/include/c3d/renderqueue.h \
- C:/devkitPro/libctru/include/tex3ds.h \
- C:/devkitPro/libctru/include/c2d/base.h \
- C:/devkitPro/libctru/include/c2d/spritesheet.h \
- C:/devkitPro/libctru/include/c2d/sprite.h \
- C:/devkitPro/libctru/include/c2d/text.h \
- C:/devkitPro/libctru/include/c2d/font.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_setup.h:
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h:
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/cover_cache.h:
 C:/devkitPro/libctru/include/3ds.h:
 C:/devkitPro/libctru/include/3ds/types.h:
 C:/devkitPro/libctru/include/3ds/result.h:
@@ -205,30 +177,4 @@ C:/devkitPro/libctru/include/3ds/romfs.h:
 C:/devkitPro/libctru/include/3ds/font.h:
 C:/devkitPro/libctru/include/3ds/gdbhio_dev.h:
 C:/devkitPro/libctru/include/3ds/3dslink.h:
-C:/devkitPro/libctru/include/citro2d.h:
-C:/devkitPro/libctru/include/citro3d.h:
-C:/devkitPro/libctru/include/c3d/types.h:
-C:/devkitPro/libctru/include/c3d/maths.h:
-C:/devkitPro/libctru/include/c3d/mtxstack.h:
-C:/devkitPro/libctru/include/c3d/uniforms.h:
-C:/devkitPro/libctru/include/c3d/attribs.h:
-C:/devkitPro/libctru/include/c3d/buffers.h:
-C:/devkitPro/libctru/include/c3d/base.h:
-C:/devkitPro/libctru/include/c3d/texenv.h:
-C:/devkitPro/libctru/include/c3d/effect.h:
-C:/devkitPro/libctru/include/c3d/texture.h:
-C:/devkitPro/libctru/include/c3d/proctex.h:
-C:/devkitPro/libctru/include/c3d/light.h:
-C:/devkitPro/libctru/include/c3d/lightlut.h:
-C:/devkitPro/libctru/include/c3d/fog.h:
-C:/devkitPro/libctru/include/c3d/framebuffer.h:
-C:/devkitPro/libctru/include/c3d/renderqueue.h:
-C:/devkitPro/libctru/include/tex3ds.h:
-C:/devkitPro/libctru/include/c2d/base.h:
-C:/devkitPro/libctru/include/c2d/spritesheet.h:
-C:/devkitPro/libctru/include/c2d/sprite.h:
-C:/devkitPro/libctru/include/c2d/text.h:
-C:/devkitPro/libctru/include/c2d/font.h:
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h:
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h:

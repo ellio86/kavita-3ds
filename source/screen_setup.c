@@ -1,6 +1,5 @@
 #include "screen_setup.h"
 #include "app.h"
-#include "config.h"
 #include "kavita_api.h"
 #include "debug_log.h"
 #include "ui.h"
@@ -150,12 +149,7 @@ void screen_setup_tick(void) {
             strncpy(g_app.token,   s_thread_token,   sizeof(g_app.token)   - 1);
             strncpy(g_app.api_key, s_thread_api_key, sizeof(g_app.api_key) - 1);
 
-            /* Persist credentials */
-            Config cfg;
-            strncpy(cfg.base_url, g_app.base_url, sizeof(cfg.base_url) - 1);
-            strncpy(cfg.username, g_app.username, sizeof(cfg.username) - 1);
-            strncpy(cfg.password, g_app.password, sizeof(cfg.password) - 1);
-            config_save(&cfg);
+            app_save_config();
 
             app_transition(SCREEN_LIBRARIES);
             return;

@@ -3,6 +3,7 @@
 #include "debug_log.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -46,6 +47,8 @@ bool config_load(Config* out) {
         } else if (strcmp(key, "password") == 0) {
             /* Legacy plaintext — migrated to password_enc on next save */
             strncpy(legacy_pw, val, sizeof(legacy_pw) - 1);
+        } else if (strcmp(key, "cover_cache") == 0) {
+            out->cover_cache = (atoi(val) != 0);
         }
     }
 
@@ -74,6 +77,7 @@ bool config_save(const Config* cfg) {
 
     fprintf(f, "base_url=%s\n", cfg->base_url);
     fprintf(f, "username=%s\n", cfg->username);
+    fprintf(f, "cover_cache=%d\n", cfg->cover_cache ? 1 : 0);
     if (cfg->password[0]) {
         char enc[256];
         if (cred_encrypt_password(cfg->password, enc, sizeof(enc)))

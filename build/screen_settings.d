@@ -1,6 +1,6 @@
-screen_setup.o: \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/source/screen_setup.c \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_setup.h \
+screen_settings.o: \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/source/screen_settings.c \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_settings.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h \
  C:/devkitPro/libctru/include/3ds.h \
  C:/devkitPro/libctru/include/3ds/types.h \
@@ -113,10 +113,8 @@ screen_setup.o: \
  C:/devkitPro/libctru/include/c2d/sprite.h \
  C:/devkitPro/libctru/include/c2d/text.h \
  C:/devkitPro/libctru/include/c2d/font.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_setup.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_settings.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h:
 C:/devkitPro/libctru/include/3ds.h:
 C:/devkitPro/libctru/include/3ds/types.h:
@@ -229,6 +227,4 @@ C:/devkitPro/libctru/include/c2d/spritesheet.h:
 C:/devkitPro/libctru/include/c2d/sprite.h:
 C:/devkitPro/libctru/include/c2d/text.h:
 C:/devkitPro/libctru/include/c2d/font.h:
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
-C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h:

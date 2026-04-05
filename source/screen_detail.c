@@ -1,5 +1,6 @@
 #include "screen_detail.h"
 #include "app.h"
+#include "cover_cache.h"
 #include "kavita_api.h"
 #include "image_loader.h"
 #include "http_client.h"
@@ -9,6 +10,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Rows shown at once in the volume/chapter list (top screen). */
 #define DETAIL_LIST_VISIBLE 7
@@ -34,6 +36,8 @@ static volatile bool      s_cover_thread_ok;
 static LightLock          s_cv_lock;
 static volatile int       s_cv_wanted_gen;
 static char               s_cv_url[512];
+static volatile char      s_cv_kind;       /* 'v' volume cover, 'c' chapter cover */
+static volatile int       s_cv_entity_id;
 static LightEvent         s_cv_wake;
 static volatile bool      s_cv_worker_stop;
 static Thread             s_cover_worker;
@@ -136,6 +140,13 @@ static void detail_start_cover_load(void) {
     LightLock_Lock(&s_cv_lock);
     s_cv_wanted_gen++;
     detail_build_cover_url(s_cv_url, sizeof(s_cv_url));
+    if (s_pick_volume) {
+        s_cv_kind      = 'v';
+        s_cv_entity_id = s_detail.volumes[s_selected].id;
+    } else {
+        s_cv_kind      = 'c';
+        s_cv_entity_id = s_detail.chapters[detail_global_chapter_index()].id;
+    }
     LightLock_Unlock(&s_cv_lock);
 
     s_cover_loading = true;
@@ -156,20 +167,39 @@ static void cover_worker(void* arg) {
         for (;;) {
             int g;
             char url[512];
+            char kind;
+            int eid;
 
             LightLock_Lock(&s_cv_lock);
             g = s_cv_wanted_gen;
             memcpy(url, s_cv_url, sizeof(url));
+            kind = s_cv_kind;
+            eid  = s_cv_entity_id;
             LightLock_Unlock(&s_cv_lock);
 
-            HttpResponse* resp = http_get(url, g_app.token);
-            bool ok = false;
             PreparedTexture local_prep;
             memset(&local_prep, 0, sizeof(local_prep));
-            if (resp && resp->status_code == 200 && resp->data && resp->size > 0)
-                ok = image_prepare_from_mem((const u8*)resp->data, resp->size,
-                                             &local_prep);
-            http_response_free(resp);
+            bool ok = false;
+
+            if (g_app.cover_cache) {
+                u8* cached = NULL;
+                size_t csz = 0;
+                if (cover_cache_read(g_app.base_url, kind, eid, &cached, &csz))
+                    ok = image_prepare_from_mem(cached, csz, &local_prep);
+                free(cached);
+            }
+
+            if (!ok) {
+                HttpResponse* resp = http_get_binary(url, g_app.token);
+                if (resp && resp->status_code == 200 && resp->data && resp->size > 0) {
+                    ok = image_prepare_from_mem((const u8*)resp->data, resp->size,
+                                                 &local_prep);
+                    if (ok && g_app.cover_cache)
+                        cover_cache_write(g_app.base_url, kind, eid,
+                                          (const u8*)resp->data, resp->size);
+                }
+                http_response_free(resp);
+            }
             if (!ok)
                 image_prepared_free(&local_prep);
 
