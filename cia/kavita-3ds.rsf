@@ -1,0 +1,21 @@
+BasicInfo:
+  Title              : "Kavita 3DS"
+  ProductCode        : "CTR-P-KAVI"
+  Logo               : Nintendo
+
+TitleInfo:
+  Category           : Application
+  UniqueId           : 0xF8C31
+
+Option:
+  UseOnSD            : true
+  FreeProductCode    : true
+  MediaFootPadding   : false
+  EnableCrypt        : false
+  EnableCompress     : true
+
+RomFs:
+  RootPath           : romfs
+
+SystemControlInfo:
+  StackSize          : 0x40000

@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Resize sources for 3DS CIA packaging (banner 256x128, icon 48x48) and write silent WAV."""
+from __future__ import annotations
+
+import argparse
+import sys
+import wave
+from pathlib import Path
+
+try:
+    from PIL import Image
+except ImportError as e:
+    print("prepare_cia_assets.py requires Pillow: pip install Pillow", file=sys.stderr)
+    raise SystemExit(1) from e
+
+
+def write_silent_wav(path: Path, duration_s: float = 0.2) -> None:
+    framerate = 44100
+    nframes = int(framerate * duration_s)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(framerate)
+        w.writeframes(b"\x00\x00" * nframes)
+
+
+def fit_banner(im: Image.Image) -> Image.Image:
+    tw, th = 256, 128
+    w, h = im.size
+    scale = max(tw / w, th / h)
+    nw, nh = int(w * scale + 0.5), int(h * scale + 0.5)
+    resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    x = (nw - tw) // 2
+    y = (nh - th) // 2
+    return resized.crop((x, y, x + tw, y + th)).convert("RGB")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--root", type=Path, required=True, help="Project root")
+    p.add_argument("--build", type=Path, required=True, help="Build output directory")
+    args = p.parse_args()
+    root = args.root.resolve()
+    bdir = args.build.resolve()
+    bdir.mkdir(parents=True, exist_ok=True)
+
+    large = Image.open(root / "icon-large.png")
+    fit_banner(large).save(bdir / "cia_banner.png", "PNG")
+
+    icon = Image.open(root / "icon.png")
+    icon.resize((48, 48), Image.Resampling.LANCZOS).save(bdir / "cia_icon48.png", "PNG")
+
+    write_silent_wav(bdir / "cia_silent.wav")
+    print("Wrote", bdir / "cia_banner.png", bdir / "cia_icon48.png", bdir / "cia_silent.wav")
+
+
+if __name__ == "__main__":
+    main()

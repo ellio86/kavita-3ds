@@ -1,0 +1,17 @@
+#pragma once
+
+#include <stdbool.h>
+
+/* ------------------------------------------------------------------ */
+/* Persisted configuration (stored on SD card)                          */
+/* Path: sdmc:/3ds/kavita-3ds/config.ini                                */
+/* Password is AES-256-GCM encrypted (device-bound key); see cred_crypto */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    char base_url[256];
+    char username[64];
+    char password[64];    /* in-memory only; on disk as password_enc= */
+} Config;
+
+bool config_load(Config* out);
+bool config_save(const Config* cfg);
