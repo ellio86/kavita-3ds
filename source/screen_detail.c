@@ -6,8 +6,12 @@
 #include "ui.h"
 
 #include <3ds.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Rows shown at once in the volume/chapter list (top screen). */
+#define DETAIL_LIST_VISIBLE 7
 
 /* ------------------------------------------------------------------ */
 /* State                                                                */
@@ -18,12 +22,21 @@ static bool               s_error;
 static char               s_error_msg[128];
 static UiSpinner          s_spinner;
 
-/* Cover image */
+/* Cover image — prepared on worker, uploaded on main */
 static LoadedTexture      s_cover;
 static bool               s_cover_loading;
 static PreparedTexture    s_cover_prep;
 static LightEvent         s_cover_event;
 static volatile bool      s_cover_ready;
+static volatile bool      s_cover_thread_ok;
+
+/* Persistent cover worker: never block the main thread on HTTP while scrolling. */
+static LightLock          s_cv_lock;
+static volatile int       s_cv_wanted_gen;
+static char               s_cv_url[512];
+static LightEvent         s_cv_wake;
+static volatile bool      s_cv_worker_stop;
+static Thread             s_cover_worker;
 
 /* List navigation: volumes first when series has multiple volumes */
 static bool               s_pick_volume;
@@ -34,8 +47,6 @@ static int                s_selected;
 /* Background threads */
 static Thread             s_detail_thread;
 static volatile bool      s_detail_done;
-static Thread             s_cover_thread;
-static volatile bool      s_cover_thread_done;
 
 static int detail_list_rows(void) {
     if (s_pick_volume)
@@ -51,6 +62,31 @@ static int detail_global_chapter_index(void) {
     return s_detail.volumes[s_vol_idx].first_chapter + s_selected;
 }
 
+/* Kavita marks extras as isSpecial; show titleName/title as the book name, not "Ch.N:". */
+static void detail_format_chapter_label(const KavitaChapter* ch, int fallback_ord1,
+                                         char* buf, size_t buf_sz) {
+    float dnum = ch->number;
+    if (dnum < -400.f || dnum > 1e6f || dnum != dnum)
+        dnum = (float)fallback_ord1;
+
+    if (ch->is_special) {
+        if (ch->title[0])
+            snprintf(buf, buf_sz, "%s", ch->title);
+        else
+            snprintf(buf, buf_sz, "Special");
+        return;
+    }
+    if (ch->title[0] && dnum == 0.f) {
+        snprintf(buf, buf_sz, "%s", ch->title);
+    } else if (ch->title[0]) {
+        snprintf(buf, buf_sz, "Ch.%.0f: %s", dnum, ch->title);
+    } else {
+        snprintf(buf, buf_sz, "Chapter %.0f", dnum);
+    }
+}
+
+static void cover_worker(void* arg);
+
 /* ------------------------------------------------------------------ */
 /* Background threads                                                   */
 /* ------------------------------------------------------------------ */
@@ -62,25 +98,109 @@ static void detail_thread(void* arg) {
     threadExit(0);
 }
 
-static void cover_thread(void* arg) {
-    (void)arg;
-    char url[512];
-    kavita_cover_url(g_app.base_url, g_app.api_key,
-                      g_app.selected_series_id, url, sizeof(url));
+static void detail_discard_pending_cover(void) {
+    LightLock_Lock(&s_cv_lock);
+    if (s_cover_ready) {
+        image_prepared_free(&s_cover_prep);
+        s_cover_ready = false;
+    }
+    LightLock_Unlock(&s_cv_lock);
+    LightEvent_Clear(&s_cover_event);
+}
 
-    HttpResponse* resp = http_get(url, g_app.token);
-    if (!resp || resp->status_code != 200) {
-        http_response_free(resp);
-        s_cover_thread_done = true;
-        threadExit(0);
+static void detail_build_cover_url(char* url, size_t url_sz) {
+    if (s_pick_volume) {
+        int vid = s_detail.volumes[s_selected].id;
+        kavita_volume_cover_url(g_app.base_url, g_app.api_key, vid, url, url_sz);
+    } else {
+        int gi = detail_global_chapter_index();
+        int cid = s_detail.chapters[gi].id;
+        kavita_chapter_cover_url(g_app.base_url, g_app.api_key, cid, url, url_sz);
+    }
+}
+
+static void detail_start_cover_load(void) {
+    if (s_loading || s_error)
+        return;
+    int rows = detail_list_rows();
+    if (rows <= 0)
+        return;
+
+    detail_discard_pending_cover();
+
+    if (s_cover.valid) {
+        image_texture_free(&s_cover);
+        s_cover.valid = false;
     }
 
-    image_prepare_from_mem((const u8*)resp->data, resp->size, &s_cover_prep);
-    http_response_free(resp);
+    LightLock_Lock(&s_cv_lock);
+    s_cv_wanted_gen++;
+    detail_build_cover_url(s_cv_url, sizeof(s_cv_url));
+    LightLock_Unlock(&s_cv_lock);
 
-    s_cover_ready = true;
-    LightEvent_Signal(&s_cover_event);
-    s_cover_thread_done = true;
+    s_cover_loading = true;
+    if (s_cover_worker)
+        LightEvent_Signal(&s_cv_wake);
+    else
+        s_cover_loading = false;
+}
+
+static void cover_worker(void* arg) {
+    (void)arg;
+
+    for (;;) {
+        LightEvent_Wait(&s_cv_wake);
+        if (s_cv_worker_stop)
+            break;
+
+        for (;;) {
+            int g;
+            char url[512];
+
+            LightLock_Lock(&s_cv_lock);
+            g = s_cv_wanted_gen;
+            memcpy(url, s_cv_url, sizeof(url));
+            LightLock_Unlock(&s_cv_lock);
+
+            HttpResponse* resp = http_get(url, g_app.token);
+            bool ok = false;
+            PreparedTexture local_prep;
+            memset(&local_prep, 0, sizeof(local_prep));
+            if (resp && resp->status_code == 200 && resp->data && resp->size > 0)
+                ok = image_prepare_from_mem((const u8*)resp->data, resp->size,
+                                             &local_prep);
+            http_response_free(resp);
+            if (!ok)
+                image_prepared_free(&local_prep);
+
+            LightLock_Lock(&s_cv_lock);
+            if (s_cv_worker_stop) {
+                LightLock_Unlock(&s_cv_lock);
+                if (ok)
+                    image_prepared_free(&local_prep);
+                threadExit(0);
+            }
+            if (g != s_cv_wanted_gen) {
+                LightLock_Unlock(&s_cv_lock);
+                if (ok)
+                    image_prepared_free(&local_prep);
+                continue;
+            }
+            if (s_cover_ready)
+                image_prepared_free(&s_cover_prep);
+            if (ok) {
+                s_cover_prep = local_prep;
+                memset(&local_prep, 0, sizeof(local_prep));
+            } else {
+                memset(&s_cover_prep, 0, sizeof(s_cover_prep));
+            }
+            s_cover_thread_ok = ok;
+            s_cover_ready = true;
+            LightLock_Unlock(&s_cv_lock);
+            LightEvent_Signal(&s_cover_event);
+            break;
+        }
+    }
     threadExit(0);
 }
 
@@ -96,18 +216,21 @@ void screen_detail_init(void) {
     s_scroll           = 0;
     s_selected         = 0;
     s_detail_done      = false;
-    s_cover_loading    = true;
+    s_cover_loading    = false;
     s_cover_ready      = false;
-    s_cover_thread_done= false;
     s_cover.valid      = false;
     s_spinner.angle    = 0.0f;
 
+    s_cv_wanted_gen   = 0;
+    s_cv_worker_stop  = false;
+    LightLock_Init(&s_cv_lock);
     LightEvent_Init(&s_cover_event, RESET_ONESHOT);
+    LightEvent_Init(&s_cv_wake, RESET_ONESHOT);
+
+    s_cover_worker = threadCreate(cover_worker, NULL, 48 * 1024, 0x30, 1, false);
 
     s_detail_thread = threadCreate(detail_thread, NULL,
                                     32 * 1024, 0x30, 1, false);
-    s_cover_thread  = threadCreate(cover_thread, NULL,
-                                    48 * 1024, 0x30, 1, false);
 }
 
 void screen_detail_fini(void) {
@@ -116,13 +239,17 @@ void screen_detail_fini(void) {
         threadFree(s_detail_thread);
         s_detail_thread = NULL;
     }
-    if (s_cover_thread) {
-        threadJoin(s_cover_thread, U64_MAX);
-        threadFree(s_cover_thread);
-        s_cover_thread = NULL;
+    s_cv_worker_stop = true;
+    LightEvent_Signal(&s_cv_wake);
+    if (s_cover_worker) {
+        threadJoin(s_cover_worker, U64_MAX);
+        threadFree(s_cover_worker);
+        s_cover_worker = NULL;
     }
-    if (s_cover_ready) image_prepared_free(&s_cover_prep);
-    if (s_cover.valid)  image_texture_free(&s_cover);
+    detail_discard_pending_cover();
+    image_prepared_free(&s_cover_prep);
+    if (s_cover.valid)
+        image_texture_free(&s_cover);
 }
 
 /* ------------------------------------------------------------------ */
@@ -143,14 +270,22 @@ void screen_detail_tick(void) {
             s_selected    = 0;
             s_scroll      = 0;
             s_pick_volume = (s_detail.volume_count > 1);
+            detail_start_cover_load();
         }
     }
 
     /* Check cover ready */
-    if (s_cover_loading && s_cover_ready &&
-        LightEvent_TryWait(&s_cover_event) != 0) {
-        image_upload_prepared(&s_cover_prep, &s_cover);
-        s_cover_loading = false;
+    if (s_cover_loading && LightEvent_TryWait(&s_cover_event) != 0) {
+        LightLock_Lock(&s_cv_lock);
+        if (s_cover_ready) {
+            if (s_cover_thread_ok)
+                image_upload_prepared(&s_cover_prep, &s_cover);
+            else
+                image_prepared_free(&s_cover_prep);
+            s_cover_ready = false;
+            s_cover_loading = false;
+        }
+        LightLock_Unlock(&s_cv_lock);
     }
 
     if (s_loading) ui_spinner_tick(&s_spinner);
@@ -167,13 +302,14 @@ void screen_detail_tick(void) {
             s_pick_volume = true;
             s_selected    = s_vol_idx;
             {
-                int vis = 7;
+                int vis = DETAIL_LIST_VISIBLE;
                 s_scroll = s_selected;
                 if (s_detail.volume_count > vis) {
                     int max_sc = s_detail.volume_count - vis;
                     if (s_scroll > max_sc) s_scroll = max_sc;
                 }
             }
+            detail_start_cover_load();
             return;
         }
 
@@ -186,6 +322,7 @@ void screen_detail_tick(void) {
                 s_pick_volume = false;
                 s_selected    = 0;
                 s_scroll      = 0;
+                detail_start_cover_load();
                 return;
             }
             int rows = detail_list_rows();
@@ -204,15 +341,35 @@ void screen_detail_tick(void) {
         }
 
         int rows = detail_list_rows();
+        const int visible = DETAIL_LIST_VISIBLE;
+        int sel_before = s_selected;
         if (kd & KEY_DOWN) {
             if (rows > 0 && s_selected < rows - 1) s_selected++;
         }
         if (kd & KEY_UP) {
             if (s_selected > 0) s_selected--;
         }
+        if (kd & KEY_RIGHT) {
+            if (rows > 0) {
+                if (s_selected + visible >= rows)
+                    s_selected = rows - 1;
+                else
+                    s_selected += visible;
+            }
+        }
+        if (kd & KEY_LEFT) {
+            if (rows > 0) {
+                if (s_selected < visible)
+                    s_selected = 0;
+                else
+                    s_selected -= visible;
+            }
+        }
+        if ((kd & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) &&
+            s_selected != sel_before)
+            detail_start_cover_load();
 
         /* Scroll management */
-        int visible = 7;
         if (s_selected < s_scroll) s_scroll = s_selected;
         if (rows > 0 && s_selected >= s_scroll + visible)
             s_scroll = s_selected - visible + 1;
@@ -261,7 +418,7 @@ void screen_detail_tick(void) {
         ui_text(g_target_top, info, 140, 32, FONT_SMALL, COL_GREY);
 
         /* Volume or chapter list */
-        int visible = 7;
+        int visible = DETAIL_LIST_VISIBLE;
         float list_x = 140, list_y = 50;
         float list_item_h = 26.0f;
         int list_rows = detail_list_rows();
@@ -291,16 +448,7 @@ void screen_detail_tick(void) {
                 KavitaChapter* ch = &s_detail.chapters[gi];
 
                 char label[64];
-                float dnum = ch->number;
-                if (dnum < -400.f || dnum > 1e6f || dnum != dnum)
-                    dnum = (float)(gi + 1);
-                if (ch->title[0] && dnum == 0.f) {
-                    snprintf(label, sizeof(label), "%s", ch->title);
-                } else if (ch->title[0]) {
-                    snprintf(label, sizeof(label), "Ch.%.0f: %s", dnum, ch->title);
-                } else {
-                    snprintf(label, sizeof(label), "Chapter %.0f", dnum);
-                }
+                detail_format_chapter_label(ch, gi + 1, label, sizeof(label));
                 ui_text_truncated(g_target_top, label,
                                    list_x + 4, iy + 2, 248, FONT_SMALL, COL_WHITE);
 
@@ -319,6 +467,10 @@ void screen_detail_tick(void) {
     C2D_DrawRectSolid(0, 0, 0.5f, 320, 240, COL_BG_BOTTOM);
 
     if (!s_loading && !s_error && detail_list_rows() > 0) {
+        char page_nav_hint[48];
+        snprintf(page_nav_hint, sizeof(page_nav_hint),
+                 "Left/Right: page (%d rows)", DETAIL_LIST_VISIBLE);
+
         if (s_pick_volume) {
             KavitaVolume* v = &s_detail.volumes[s_selected];
             char vol_title[48];
@@ -330,24 +482,18 @@ void screen_detail_tick(void) {
             ui_text_centered(g_target_bottom, sub, 0, 320, 38,
                               FONT_SMALL, COL_GREY);
             ui_text_centered(g_target_bottom, "A: Open volume  B: Back",
-                              0, 320, 160, FONT_MED, COL_WHITE);
+                              0, 320, 152, FONT_MED, COL_WHITE);
             ui_text_centered(g_target_bottom,
-                              "D-Pad toward D-Pad / away: move selection",
-                              0, 320, 185, FONT_SMALL, COL_GREY);
+                              "Up/Down: one row",
+                              0, 320, 178, FONT_SMALL, COL_GREY);
+            ui_text_centered(g_target_bottom, page_nav_hint,
+                              0, 320, 198, FONT_SMALL, COL_GREY);
         } else {
             int gi = detail_global_chapter_index();
             KavitaChapter* ch = &s_detail.chapters[gi];
 
             char title[256];
-            float dnum = ch->number;
-            if (dnum < -400.f || dnum > 1e6f || dnum != dnum)
-                dnum = (float)(gi + 1);
-            if (ch->title[0]) {
-                strncpy(title, ch->title, sizeof(title) - 1);
-                title[sizeof(title) - 1] = '\0';
-            } else {
-                snprintf(title, sizeof(title), "Chapter %.0f", dnum);
-            }
+            detail_format_chapter_label(ch, gi + 1, title, sizeof(title));
             ui_text_centered(g_target_bottom, title, 0, 320, 15,
                               FONT_MED, COL_ACCENT);
 
@@ -365,14 +511,16 @@ void screen_detail_tick(void) {
 
             if (s_detail.volume_count > 1) {
                 ui_text_centered(g_target_bottom, "A: Read  B: Volume list",
-                                  0, 320, 160, FONT_MED, COL_WHITE);
+                                  0, 320, 152, FONT_MED, COL_WHITE);
             } else {
                 ui_text_centered(g_target_bottom, "A: Read  B: Back",
-                                  0, 320, 160, FONT_MED, COL_WHITE);
+                                  0, 320, 152, FONT_MED, COL_WHITE);
             }
             ui_text_centered(g_target_bottom,
-                              "D-Pad toward D-Pad / away: move selection",
-                              0, 320, 185, FONT_SMALL, COL_GREY);
+                              "Up/Down: one row",
+                              0, 320, 178, FONT_SMALL, COL_GREY);
+            ui_text_centered(g_target_bottom, page_nav_hint,
+                              0, 320, 198, FONT_SMALL, COL_GREY);
         }
     } else if (s_error) {
         ui_text_centered(g_target_bottom, "B: Back to series",

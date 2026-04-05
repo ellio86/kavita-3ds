@@ -37,9 +37,9 @@
 #define BOT_LOG_W BOT_PHYS_H
 #define BOT_LOG_H BOT_PHYS_W
 
-#define ZOOM_LEVEL_COUNT 5
+#define ZOOM_LEVEL_COUNT 7
 static const float s_zoom_levels[ZOOM_LEVEL_COUNT] =
-    { 1.0f, 1.35f, 1.75f, 2.25f, 2.75f };
+    { 1.0f, 1.35f, 1.75f, 2.25f, 2.75f, 3.35f, 4.0f };
 
 static int   s_zoom_i;
 static float s_pan_x[2];
@@ -700,8 +700,16 @@ void screen_reader_tick(void) {
         float z = reader_zoom();
 
         if (s_state == READER_SHOW || s_state == READER_LOADING) {
-            if (kd & KEY_X) {
-                s_zoom_i = (s_zoom_i + 1) % ZOOM_LEVEL_COUNT;
+            /* Book mode: “up/down” along the page is physical D-Right / D-Left (D-Pad at bottom). */
+            if (kd & KEY_DRIGHT && s_zoom_i < ZOOM_LEVEL_COUNT - 1) {
+                s_zoom_i++;
+                s_pan_x[0] = 0.f;
+                s_pan_x[1] = 0.f;
+                s_pan_y[0] = 0.f;
+                s_pan_y[1] = 0.f;
+            }
+            if (kd & KEY_DLEFT && s_zoom_i > 0) {
+                s_zoom_i--;
                 s_pan_x[0] = 0.f;
                 s_pan_x[1] = 0.f;
                 s_pan_y[0] = 0.f;
@@ -868,8 +876,8 @@ void screen_reader_tick(void) {
             const float line_step = 15.f;
             C2D_DrawRectSolid(8, hint_top, Z_READER_HINT_BG, BOT_LOG_W - 16,
                               hint_h, C2D_Color32(0, 0, 0, 200));
-            reader_text_centered_z("X: Adjust Zoom Level", BOT_LOG_W,
-                                    line_y0, FONT_TINY, COL_WHITE,
+            reader_text_centered_z("D-Pad Up / Down: Zoom In / Out",
+                                    BOT_LOG_W, line_y0, FONT_TINY, COL_WHITE,
                                     Z_READER_HUD_FG);
             reader_text_centered_z("Circle Pad (Whilst Zoomed): Pan Viewport",
                                     BOT_LOG_W, line_y0 + line_step, FONT_TINY,
@@ -880,7 +888,7 @@ void screen_reader_tick(void) {
             reader_text_centered_z("B: Back to Chapter List", BOT_LOG_W,
                                     line_y0 + 3.f * line_step, FONT_TINY,
                                     COL_GREY, Z_READER_HUD_FG);
-            reader_text_centered_z("Left / Right D-Pad: Previous / Next Page",
+            reader_text_centered_z("D-Pad Left / Right: Previous / Next Page",
                                     BOT_LOG_W, line_y0 + 4.f * line_step,
                                     FONT_TINY, COL_GREY, Z_READER_HUD_FG);
         }

@@ -37,6 +37,7 @@ typedef struct {
     float number;     /* chapter number (0 for specials) */
     int  pages;
     int  pages_read;
+    bool is_special;  /* Kavita ChapterDto.isSpecial — one-shot / extra issues */
 } KavitaChapter;
 
 typedef struct {
@@ -104,6 +105,9 @@ bool kavita_save_progress(const char* base_url, const char* token,
 
 void kavita_cover_url(const char* base_url, const char* api_key,
                        int series_id, char* buf, size_t sz);
+
+void kavita_volume_cover_url(const char* base_url, const char* api_key,
+                               int volume_id, char* buf, size_t sz);
 
 void kavita_chapter_cover_url(const char* base_url, const char* api_key,
                                int chapter_id, char* buf, size_t sz);

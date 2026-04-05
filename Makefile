@@ -53,8 +53,16 @@ CIA_SILENT_WAV  :=  $(BUILD)/cia_silent.wav
 CIA_BANNER_BIN  :=  $(BUILD)/cia_banner.bin
 CIA_SMDH        :=  $(BUILD)/cia_icon.smdh
 PYTHON          ?=  python
+# Prefer unpacked tools under .cia-tools (Windows .exe; paths work under MSYS2 make).
+CIA_MAKEROM_LOCAL    :=  $(CURDIR)/.cia-tools/makerom/makerom.exe
+CIA_BANNERTOOL_LOCAL :=  $(CURDIR)/.cia-tools/bannertool/bannertool-1.2.2-windows/bannertool.exe
+ifeq ($(wildcard $(CIA_MAKEROM_LOCAL)),)
 BANNERTOOL      ?=  bannertool
 MAKEROM         ?=  makerom
+else
+BANNERTOOL      ?=  $(CIA_BANNERTOOL_LOCAL)
+MAKEROM         ?=  $(CIA_MAKEROM_LOCAL)
+endif
 SMDHTOOL        ?=  smdhtool
 
 #---------------------------------------------------------------------------------

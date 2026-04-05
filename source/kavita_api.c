@@ -3,6 +3,7 @@
 #include "debug_log.h"
 #include "cJSON.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -411,8 +412,10 @@ bool kavita_get_series_detail(const char* base_url, const char* token,
             cJSON* csort     = cJSON_GetObjectItemCaseSensitive(ch, "sortOrder");
             cJSON* cpages    = cJSON_GetObjectItemCaseSensitive(ch, "pages");
             cJSON* cpread    = cJSON_GetObjectItemCaseSensitive(ch, "pagesRead");
+            cJSON* cispec    = cJSON_GetObjectItemCaseSensitive(ch, "isSpecial");
 
             c->volume_id = v->id;
+            c->is_special = cJSON_IsBool(cispec) && cJSON_IsTrue(cispec);
             if (cJSON_IsNumber(cid))    c->id         = cid->valueint;
             /* Prefer titleName, then title, then range (Kavita ChapterDto). */
             if (cJSON_IsString(ctitleNm) && ctitleNm->valuestring)
@@ -510,6 +513,12 @@ void kavita_cover_url(const char* base_url, const char* api_key,
                        int series_id, char* buf, size_t sz) {
     snprintf(buf, sz, "%s/api/Image/series-cover?seriesId=%d&apiKey=%s",
              base_url, series_id, api_key ? api_key : "");
+}
+
+void kavita_volume_cover_url(const char* base_url, const char* api_key,
+                               int volume_id, char* buf, size_t sz) {
+    snprintf(buf, sz, "%s/api/Image/volume-cover?volumeId=%d&apiKey=%s",
+             base_url, volume_id, api_key ? api_key : "");
 }
 
 void kavita_chapter_cover_url(const char* base_url, const char* api_key,
