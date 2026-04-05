@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <strings.h>
 
 /* Kavita uses large negatives (e.g. -100000) in sort keys — not for display. */
 static bool chapter_ord_sane(double x) {
@@ -20,6 +21,37 @@ static void chapter_sanitize_title(char* title, size_t title_sz) {
     if (end && *end == '\0' && !chapter_ord_sane((double)v))
         title[0] = '\0';
     (void)title_sz;
+}
+
+/* Kavita often puts sort keys in range/title for specials; sanitizing would blank
+ * them. File path is a reliable fallback when API title fields are empty. */
+static void chapter_title_from_filepath(const char* path, char* out, size_t out_sz) {
+    if (!path || !out || out_sz == 0) return;
+    const char* base = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    }
+    if (!base[0]) return;
+
+    size_t n = 0;
+    while (base[n] && n + 1 < out_sz)
+        n++;
+    if (n == 0) return;
+
+    memcpy(out, base, n);
+    out[n] = '\0';
+
+    static const char* const exts[] = {
+        ".cbz", ".cbr", ".zip", ".rar", ".pdf", ".epub", ".7z"
+    };
+    for (size_t e = 0; e < sizeof(exts) / sizeof(exts[0]); e++) {
+        size_t el = strlen(exts[e]);
+        if (n > el && strcasecmp(out + n - el, exts[e]) == 0) {
+            out[n - el] = '\0';
+            break;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -424,7 +456,24 @@ bool kavita_get_series_detail(const char* base_url, const char* token,
                 strncpy(c->title, ctitle->valuestring, sizeof(c->title) - 1);
             else if (cJSON_IsString(crange) && crange->valuestring)
                 strncpy(c->title, crange->valuestring, sizeof(c->title) - 1);
-            chapter_sanitize_title(c->title, sizeof(c->title));
+            /* Do not strip numeric "titles" for specials — Kavita uses sort keys
+             * (e.g. large negatives) in range; sanitize would clear the only label. */
+            if (!c->is_special)
+                chapter_sanitize_title(c->title, sizeof(c->title));
+            if (!c->title[0] && c->is_special) {
+                cJSON* cfiles = cJSON_GetObjectItemCaseSensitive(ch, "files");
+                if (cJSON_IsArray(cfiles) && cJSON_GetArraySize(cfiles) > 0) {
+                    cJSON* f0 = cJSON_GetArrayItem(cfiles, 0);
+                    if (f0) {
+                        cJSON* fpath =
+                            cJSON_GetObjectItemCaseSensitive(f0, "filePath");
+                        if (cJSON_IsString(fpath) && fpath->valuestring)
+                            chapter_title_from_filepath(fpath->valuestring,
+                                                        c->title,
+                                                        sizeof(c->title));
+                    }
+                }
+            }
 
             /* Display number: prefer minNumber / issue number over sortOrder.
              * Kavita often sends sortOrder 0 when unset; taking sortOrder first

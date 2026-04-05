@@ -45,7 +45,8 @@ APP_AUTHOR  :=  kavita-3ds
 # smdhtool requires 48x48; source icon.png may be smaller — reuse CIA prep output.
 ICON        :=  $(BUILD)/cia_icon48.png
 
-# CIA packaging (makerom + bannertool on PATH, or set MAKEROM / BANNERTOOL; needs mkromfs3ds from devkitPro tools)
+# CIA packaging: built automatically by `all` after .3dsx. Prefer tools under
+# .cia-tools/ (see CIA_*_LOCAL); otherwise makerom + bannertool on PATH.
 CIA_RSF         :=  cia/kavita-3ds.rsf
 CIA_BANNER_PNG  :=  $(BUILD)/cia_banner.png
 CIA_ICON48_PNG  :=  $(BUILD)/cia_icon48.png
@@ -173,6 +174,7 @@ endif
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(CIA_ICON48_PNG)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@$(MAKE) --no-print-directory -f $(CURDIR)/Makefile $(OUTPUT).cia
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
