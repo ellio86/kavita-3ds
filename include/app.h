@@ -47,6 +47,8 @@ typedef struct {
 
     /* Persisted via config.ini (see config_save / app_save_config) */
     bool cover_cache;
+    bool reader_page_cache; /* SD cache for Kavita image pages while reading */
+    int  reader_cache_pages; /* next N pages after current (1-based count) to prefetch */
 } AppState;
 
 extern AppState g_app;

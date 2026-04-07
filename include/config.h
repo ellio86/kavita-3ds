@@ -12,6 +12,8 @@ typedef struct {
     char username[64];
     char password[64];    /* in-memory only; on disk as password_enc= */
     bool cover_cache;       /* cache series/volume/chapter covers on SD */
+    bool reader_page_cache;
+    int  reader_cache_pages;
 } Config;
 
 bool config_load(Config* out);

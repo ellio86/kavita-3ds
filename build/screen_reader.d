@@ -117,6 +117,7 @@ screen_reader.o: \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/epub_reader.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/reader_page_cache.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_reader.h:
@@ -236,5 +237,6 @@ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/epub_reader.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/reader_page_cache.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h:

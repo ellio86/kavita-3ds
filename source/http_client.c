@@ -301,7 +301,7 @@ static HttpResponse* do_request(const char* url,
                                  const char* method,
                                  const char* json_body,
                                  const char* accept) {
-    char current_url[512];
+    char current_url[1024];
     strncpy(current_url, url, sizeof(current_url) - 1);
     current_url[sizeof(current_url) - 1] = '\0';
 
@@ -315,7 +315,7 @@ static HttpResponse* do_request(const char* url,
         bool tls  = false;
         char host[256] = {0};
         int  port      = 80;
-        char path[512] = {0};
+        char path[1024] = {0};
 
         if (!parse_url(current_url, &tls, host, sizeof(host), &port, path, sizeof(path)))
             return NULL;
@@ -327,7 +327,7 @@ static HttpResponse* do_request(const char* url,
             return NULL;
 
         /* ---- send request ---- */
-        char line[512];
+        char line[1024];
         int  n;
 
 #define SEND(s, l) do { if (!conn_send_all(&conn, (s), (l))) { conn_close(&conn); return NULL; } } while(0)

@@ -283,8 +283,14 @@ int kavita_get_series(const char* base_url, const char* token,
                        int library_id, int page, int page_size,
                        KavitaSeries* buf, int max_count,
                        int* out_total) {
-    char url[512];
-    snprintf(url, sizeof(url), "%s/api/Series/all-v2", base_url);
+    char url[768];
+    /* Pagination: query params pageNumber + pageSize (UserParams), same as the
+     * official web UI (see SeriesService.getAllSeriesV2). Include context=1
+     * (QueryContext.None) like the Angular client. Body must use FilterV2Dto
+     * field names from the API docs (sortOptions, not sorting). */
+    snprintf(url, sizeof(url),
+             "%s/api/Series/all-v2?context=1&pageNumber=%d&pageSize=%d",
+             base_url, page, page_size);
 
     /* Build filter body */
     char lib_id_str[32];
@@ -300,13 +306,9 @@ int kavita_get_series(const char* base_url, const char* token,
 
     cJSON_AddNumberToObject(body, "combination", 1);  /* AND */
 
-    cJSON* sorting = cJSON_AddObjectToObject(body, "sorting");
-    cJSON_AddNumberToObject(sorting, "sortField", 1);       /* Name */
-    cJSON_AddBoolToObject(sorting, "isAscending", 1);
-
-    cJSON* pagination = cJSON_AddObjectToObject(body, "pagination");
-    cJSON_AddNumberToObject(pagination, "pageNumber", page);
-    cJSON_AddNumberToObject(pagination, "itemsSize", page_size);
+    cJSON* sort_opts = cJSON_AddObjectToObject(body, "sortOptions");
+    cJSON_AddNumberToObject(sort_opts, "sortField", 1);   /* SortField.Name */
+    cJSON_AddBoolToObject(sort_opts, "isAscending", 1);
 
     char* body_str = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);

@@ -117,7 +117,8 @@ app.o: C:/Users/ellio/source/repos/ellio86/kavita-3ds/source/app.c \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_settings.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_series.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_detail.h \
- C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_reader.h
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_reader.h \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/reader_page_cache.h
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h:
 C:/devkitPro/libctru/include/3ds.h:
 C:/devkitPro/libctru/include/3ds/types.h:
@@ -237,3 +238,4 @@ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_settings.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_series.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_detail.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_reader.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/reader_page_cache.h:

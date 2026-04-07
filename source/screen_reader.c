@@ -4,6 +4,7 @@
 #include "epub_reader.h"
 #include "image_loader.h"
 #include "http_client.h"
+#include "reader_page_cache.h"
 #include "ui.h"
 #include "debug_log.h"
 
@@ -109,11 +110,81 @@ typedef struct {
 static ProgressArgs s_progress_args;
 
 typedef struct {
-    int spread_idx;
-    int side;
-    int page;
+    int  spread_idx;
+    int  side;
+    int  page;
+    bool allow_http;
+    int  cache_reader_page;
 } FetchArgs;
 static FetchArgs s_fetch_args;
+
+typedef struct {
+    int page;
+} PrefetchArgs;
+static PrefetchArgs   s_prefetch_args;
+static Thread         s_prefetch_thread;
+static volatile bool  s_prefetch_done;
+
+static void wait_prefetch(void) {
+    if (s_prefetch_thread) {
+        threadJoin(s_prefetch_thread, U64_MAX);
+        threadFree(s_prefetch_thread);
+        s_prefetch_thread = NULL;
+    }
+    s_prefetch_done = false;
+}
+
+static void prefetch_thread(void* arg) {
+    PrefetchArgs* pa = (PrefetchArgs*)arg;
+    int p = pa->page;
+    char url_log[512];
+    url_log[0] = '\0';
+
+    kavita_page_url(g_app.base_url, g_app.api_key,
+                    g_app.selected_chapter_id, p,
+                    url_log, sizeof(url_log));
+
+    HttpResponse* resp = http_get(url_log, g_app.token);
+    if (!resp || resp->status_code != 200) {
+        if (resp)
+            http_response_free(resp);
+        s_prefetch_done = true;
+        threadExit(0);
+    }
+
+    int lookahead = g_app.reader_cache_pages > 0 ? g_app.reader_cache_pages : 10;
+    int rp         = g_app.reader_page;
+
+    reader_page_cache_write(g_app.selected_chapter_id, p,
+                            (const u8*)resp->data, resp->size, rp, lookahead);
+    http_response_free(resp);
+    s_prefetch_done = true;
+    threadExit(0);
+}
+
+static void try_start_prefetch(void) {
+    if (s_prefetch_thread)
+        return;
+    if (s_fetch_thread)
+        return;
+    if (!g_app.reader_page_cache || g_app.reader_epub)
+        return;
+
+    int P = g_app.reader_page;
+    int T = g_app.reader_total_pages;
+    int N = g_app.reader_cache_pages > 0 ? g_app.reader_cache_pages : 10;
+    int ch = g_app.selected_chapter_id;
+
+    for (int p = P + 1; p <= P + N && p < T; p++) {
+        if (reader_page_cache_exists(ch, p))
+            continue;
+        s_prefetch_args.page = p;
+        s_prefetch_done      = false;
+        s_prefetch_thread =
+            threadCreate(prefetch_thread, &s_prefetch_args, 64 * 1024, 0x30, 1, false);
+        return;
+    }
+}
 
 /* EPUB text: one spine item flows left screen (top) then right (bottom), then D-pad
  * advances to the next slice of the same chapter. Line index is rebuilt from text[0]. */
@@ -359,21 +430,48 @@ static void fetch_page_thread(void* arg) {
                          g_app.selected_chapter_id, a->page,
                          url_log, sizeof(url_log));
 
-        HttpResponse* resp = http_get(url_log, g_app.token);
-        if (!resp || resp->status_code != 200) {
-            dlog("[reader][ERR] HTTP fail chap=%d page=%d (1-based) status=%d",
-                 g_app.selected_chapter_id, a->page + 1,
-                 resp ? resp->status_code : -1);
-            http_response_free(resp);
-            s_fetch_failed = true;
-            s_fetch_done   = true;
-            threadExit(0);
+        int lookahead = g_app.reader_cache_pages > 0 ? g_app.reader_cache_pages : 10;
+        int cache_rp    = a->cache_reader_page;
+
+        ok = false;
+        if (g_app.reader_page_cache) {
+            u8* cached = NULL;
+            size_t csz = 0;
+            if (reader_page_cache_read(g_app.selected_chapter_id, a->page,
+                                       &cached, &csz)) {
+                body_sz = csz;
+                ok = image_prepare_from_mem(cached, csz, &prep);
+                free(cached);
+                s_pending_is_text = false;
+            } else if (!a->allow_http) {
+                s_fetch_done = true;
+                s_fetch_failed = false;
+                threadExit(0);
+            }
         }
 
-        body_sz = resp->size;
-        ok = image_prepare_from_mem((const u8*)resp->data, resp->size, &prep);
-        http_response_free(resp);
-        s_pending_is_text = false;
+        if (!ok) {
+            HttpResponse* resp = http_get(url_log, g_app.token);
+            if (!resp || resp->status_code != 200) {
+                dlog("[reader][ERR] HTTP fail chap=%d page=%d (1-based) status=%d",
+                     g_app.selected_chapter_id, a->page + 1,
+                     resp ? resp->status_code : -1);
+                http_response_free(resp);
+                s_fetch_failed = true;
+                s_fetch_done   = true;
+                threadExit(0);
+            }
+
+            body_sz = resp->size;
+            ok = image_prepare_from_mem((const u8*)resp->data, resp->size, &prep);
+            if (ok && g_app.reader_page_cache) {
+                reader_page_cache_write(g_app.selected_chapter_id, a->page,
+                                        (const u8*)resp->data, resp->size,
+                                        cache_rp, lookahead);
+            }
+            http_response_free(resp);
+            s_pending_is_text = false;
+        }
     }
 
     if (ok) {
@@ -400,11 +498,17 @@ static void start_fetch(int page, int spread_idx, int side) {
     if (page < 0 || page >= g_app.reader_total_pages) return;
     if (s_fetch_thread) return;
 
-    s_fetch_args.page        = page;
-    s_fetch_args.spread_idx  = spread_idx;
-    s_fetch_args.side        = side;
-    s_fetch_done             = false;
-    s_fetch_failed           = false;
+    bool allow_http = true;
+    if (g_app.reader_page_cache && !g_app.reader_epub && spread_idx == SI_NEXT)
+        allow_http = false;
+
+    s_fetch_args.page              = page;
+    s_fetch_args.spread_idx        = spread_idx;
+    s_fetch_args.side              = side;
+    s_fetch_args.allow_http        = allow_http;
+    s_fetch_args.cache_reader_page = g_app.reader_page;
+    s_fetch_done                   = false;
+    s_fetch_failed                 = false;
 
     s_fetch_thread = threadCreate(fetch_page_thread, &s_fetch_args,
                                    64 * 1024, 0x30, 1, false);
@@ -476,6 +580,7 @@ static void go_next_spread(void) {
         if (g_app.reader_page + 1 >= g_app.reader_total_pages)
             return;
 
+        wait_prefetch();
         wait_fetch();
         discard_pending_page();
 
@@ -504,6 +609,7 @@ static void go_next_spread(void) {
 
     if (!can_advance_spread() || !curr_spread_complete()) return;
 
+    wait_prefetch();
     wait_fetch();
     discard_pending_page();
 
@@ -517,6 +623,10 @@ static void go_next_spread(void) {
     }
 
     g_app.reader_page += 2;
+    if (g_app.reader_page_cache && !g_app.reader_epub) {
+        reader_page_cache_delete_pages_before(g_app.selected_chapter_id,
+                                              g_app.reader_page);
+    }
     /* Keep zoom + pan across spreads; clamp_pan_* fixes bounds per page. */
 
     s_state = curr_spread_complete() ? READER_SHOW : READER_LOADING;
@@ -540,6 +650,7 @@ static void go_prev_spread(void) {
             return;
         }
 
+        wait_prefetch();
         wait_fetch();
         discard_pending_page();
         spread_free(&s_sp[SI_NEXT]);
@@ -555,6 +666,7 @@ static void go_prev_spread(void) {
         return;
     }
 
+    wait_prefetch();
     wait_fetch();
     discard_pending_page();
     spread_free(&s_sp[SI_NEXT]);
@@ -593,6 +705,7 @@ static void reader_jump_to_page_1based(int page_1) {
         return;
     }
 
+    wait_prefetch();
     wait_fetch();
     discard_pending_page();
     spread_free(&s_sp[SI_CURR]);
@@ -1092,6 +1205,8 @@ void screen_reader_init(void) {
     for (int i = 0; i < SI_COUNT; i++)
         spread_free(&s_sp[i]);
 
+    reader_page_cache_clear();
+
     /* PDF: refresh page count / server cache. EPUB uses list count; spine fixed at open. */
     if (!g_app.reader_epub) {
         int info_pages = 0;
@@ -1117,6 +1232,9 @@ void screen_reader_init(void) {
     s_progress_thread          = NULL;
     s_progress_thread_running  = false;
 
+    s_prefetch_thread = NULL;
+    s_prefetch_done   = false;
+
     LightEvent_Init(&s_page_ready_event, RESET_ONESHOT);
 
     s_pending_is_text   = false;
@@ -1140,6 +1258,7 @@ void screen_reader_fini(void) {
         wait_progress_thread();
     }
 
+    wait_prefetch();
     wait_fetch();
     epub_reader_close();
 
@@ -1155,6 +1274,8 @@ void screen_reader_fini(void) {
     s_pending_is_text = false;
     image_prepared_free(&s_pending_prep);
     s_pending_ready = false;
+
+    reader_page_cache_clear();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1251,6 +1372,16 @@ void screen_reader_tick(void) {
             s_state = READER_SHOW;
         }
     }
+
+    if (s_prefetch_thread && s_prefetch_done) {
+        threadJoin(s_prefetch_thread, U64_MAX);
+        threadFree(s_prefetch_thread);
+        s_prefetch_thread = NULL;
+        s_prefetch_done = false;
+    }
+
+    try_start_prefetch();
+    try_start_fetch();
 
     if (curr_spread_complete() && s_state == READER_LOADING) {
         s_state = READER_SHOW;

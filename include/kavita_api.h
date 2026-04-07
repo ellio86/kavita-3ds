@@ -74,8 +74,8 @@ int kavita_get_libraries(const char* base_url, const char* token,
 /* Series                                                               */
 /* ------------------------------------------------------------------ */
 
-/* POST /api/Series/all-v2  (paginated, page is 1-based in Kavita API)
-   Returns count fetched, -1 on error, 0 when no more results. */
+/* POST /api/Series/all-v2  (?context=1&pageNumber=&pageSize= on query; page 1-based)
+   Filter body: FilterV2Dto (sortOptions, statements, …). */
 int kavita_get_series(const char* base_url, const char* token,
                        int library_id, int page, int page_size,
                        KavitaSeries* buf, int max_count,

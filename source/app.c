@@ -6,6 +6,7 @@
 #include "screen_series.h"
 #include "screen_detail.h"
 #include "screen_reader.h"
+#include "reader_page_cache.h"
 
 #include <string.h>
 
@@ -63,8 +64,12 @@ void app_init(void) {
         strncpy(g_app.username,  cfg.username,  sizeof(g_app.username)  - 1);
         strncpy(g_app.password,  cfg.password,  sizeof(g_app.password)  - 1);
         g_app.cover_cache = cfg.cover_cache;
+        g_app.reader_page_cache = cfg.reader_page_cache;
+        g_app.reader_cache_pages = cfg.reader_cache_pages > 0 ? cfg.reader_cache_pages : 10;
         /* Start on setup screen regardless — user must connect (tap or A) to login */
     }
+    if (g_app.reader_cache_pages <= 0)
+        g_app.reader_cache_pages = 10;
 
     g_app.current_screen = SCREEN_SETUP;
     screen_init(g_app.current_screen);
@@ -72,6 +77,7 @@ void app_init(void) {
 
 void app_fini(void) {
     screen_fini(g_app.current_screen);
+    reader_page_cache_clear();
 }
 
 void app_tick(void) {
@@ -92,5 +98,7 @@ void app_save_config(void) {
     strncpy(cfg.username,  g_app.username,  sizeof(cfg.username)  - 1);
     strncpy(cfg.password,  g_app.password,  sizeof(cfg.password)  - 1);
     cfg.cover_cache = g_app.cover_cache;
+    cfg.reader_page_cache = g_app.reader_page_cache;
+    cfg.reader_cache_pages = g_app.reader_cache_pages > 0 ? g_app.reader_cache_pages : 10;
     config_save(&cfg);
 }

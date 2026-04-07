@@ -49,6 +49,10 @@ bool config_load(Config* out) {
             strncpy(legacy_pw, val, sizeof(legacy_pw) - 1);
         } else if (strcmp(key, "cover_cache") == 0) {
             out->cover_cache = (atoi(val) != 0);
+        } else if (strcmp(key, "reader_page_cache") == 0) {
+            out->reader_page_cache = (atoi(val) != 0);
+        } else if (strcmp(key, "reader_cache_pages") == 0) {
+            out->reader_cache_pages = atoi(val);
         }
     }
 
@@ -78,6 +82,8 @@ bool config_save(const Config* cfg) {
     fprintf(f, "base_url=%s\n", cfg->base_url);
     fprintf(f, "username=%s\n", cfg->username);
     fprintf(f, "cover_cache=%d\n", cfg->cover_cache ? 1 : 0);
+    fprintf(f, "reader_page_cache=%d\n", cfg->reader_page_cache ? 1 : 0);
+    fprintf(f, "reader_cache_pages=%d\n", cfg->reader_cache_pages > 0 ? cfg->reader_cache_pages : 10);
     if (cfg->password[0]) {
         char enc[256];
         if (cred_encrypt_password(cfg->password, enc, sizeof(enc)))
