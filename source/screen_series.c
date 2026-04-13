@@ -4,6 +4,7 @@
 #include "kavita_api.h"
 #include "image_loader.h"
 #include "http_client.h"
+#include "debug_log.h"
 #include "ui.h"
 
 #include <3ds.h>
@@ -587,7 +588,11 @@ static void start_cover_fetch(int series_idx) {
     s_cover_fetch_idx   = series_idx;
     s_cover_thread = threadCreate(cover_fetch_thread,
                                   (void*)(intptr_t)series_idx,
-                                  48 * 1024, 0x30, 1, false);
+                                  48 * 1024, 0x30, -1, false);
+    if (!s_cover_thread) {
+        dlog("[ERR] series: threadCreate failed; cannot fetch covers");
+        s_cover_thread_done = true;
+    }
 }
 
 static void kick_cover_worker(void) {
@@ -665,7 +670,12 @@ void screen_series_init(void) {
     LightEvent_Init(&s_cover_ready_event, RESET_ONESHOT);
 
     s_list_thread = threadCreate(list_thread, NULL,
-                                 32 * 1024, 0x30, 1, false);
+                                 32 * 1024, 0x30, -1, false);
+    if (!s_list_thread) {
+        dlog("[ERR] series: threadCreate failed; cannot fetch series list");
+        s_list_done = true;
+        s_series_count = -1;
+    }
 }
 
 void screen_series_fini(void) {

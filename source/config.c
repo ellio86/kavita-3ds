@@ -11,12 +11,32 @@
 #define CONFIG_DIR  "sdmc:/3ds/kavita-3ds"
 #define CONFIG_PATH "sdmc:/3ds/kavita-3ds/config.ini"
 
+static void config_write_default_file(void) {
+    /* Ensure directory exists */
+    mkdir(CONFIG_DIR, 0777);
+    FILE* f = fopen(CONFIG_PATH, "w");
+    if (!f) return;
+
+    /* Keep it minimal and parseable by our simple key=value loader. */
+    fprintf(f, "base_url=\n");
+    fprintf(f, "username=\n");
+    fprintf(f, "cover_cache=1\n");
+    fprintf(f, "reader_page_cache=1\n");
+    fprintf(f, "reader_cache_pages=10\n");
+    fclose(f);
+}
+
 bool config_load(Config* out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
 
     FILE* f = fopen(CONFIG_PATH, "r");
-    if (!f) return false;
+    if (!f) {
+        /* First run (or missing SD file): create defaults for next launch. */
+        config_write_default_file();
+        dlog("[cfg] config.ini missing; wrote default to " CONFIG_PATH);
+        return false;
+    }
 
     char password_enc[256];
     char legacy_pw[sizeof(out->password)];

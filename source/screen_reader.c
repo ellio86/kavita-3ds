@@ -181,7 +181,11 @@ static void try_start_prefetch(void) {
         s_prefetch_args.page = p;
         s_prefetch_done      = false;
         s_prefetch_thread =
-            threadCreate(prefetch_thread, &s_prefetch_args, 64 * 1024, 0x30, 1, false);
+            threadCreate(prefetch_thread, &s_prefetch_args, 64 * 1024, 0x30, -1, false);
+        if (!s_prefetch_thread) {
+            dlog("[reader] prefetch threadCreate failed");
+            s_prefetch_done = true;
+        }
         return;
     }
 }
@@ -243,7 +247,7 @@ static void fire_save_progress(int page) {
     s_progress_args.page_num   = page;
 
     s_progress_thread = threadCreate(progress_thread, &s_progress_args,
-                                      16 * 1024, 0x3f, 1, false);
+                                      16 * 1024, 0x3f, -1, false);
     if (!s_progress_thread) {
         dlog("[reader] progress threadCreate failed");
         s_progress_thread_running = false;
@@ -511,7 +515,12 @@ static void start_fetch(int page, int spread_idx, int side) {
     s_fetch_failed                 = false;
 
     s_fetch_thread = threadCreate(fetch_page_thread, &s_fetch_args,
-                                   64 * 1024, 0x30, 1, false);
+                                   64 * 1024, 0x30, -1, false);
+    if (!s_fetch_thread) {
+        dlog("[reader][ERR] fetch threadCreate failed page=%d", page + 1);
+        s_fetch_done = true;
+        s_fetch_failed = true;
+    }
 }
 
 /* Finish current spread, then preload the following spread only. */

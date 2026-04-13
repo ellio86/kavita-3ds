@@ -81,7 +81,16 @@ static void setup_try_connect(void) {
     snprintf(s_status_msg, sizeof(s_status_msg), "Connecting...");
     dlog("[API] connecting to '%s' as '%s'", g_app.base_url, g_app.username);
     s_thread = threadCreate(login_thread, NULL,
-                             32 * 1024, 0x30, 1, false);
+                             32 * 1024, 0x30, -1, false);
+    if (!s_thread) {
+        /* If thread creation fails, we'd otherwise spin forever in CONNECTING. */
+        dlog("[ERR] setup: threadCreate failed; cannot start login thread");
+        snprintf(s_status_msg, sizeof(s_status_msg),
+                 "System error starting login");
+        s_state = STATE_ERROR;
+        s_thread_done = true;
+        s_thread_ok = false;
+    }
 }
 
 /* ------------------------------------------------------------------ */

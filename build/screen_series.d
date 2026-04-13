@@ -117,6 +117,7 @@ screen_series.o: \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_series.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h:
@@ -235,4 +236,5 @@ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/cover_cache.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/image_loader.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/http_client.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h:

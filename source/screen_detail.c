@@ -4,6 +4,7 @@
 #include "kavita_api.h"
 #include "image_loader.h"
 #include "http_client.h"
+#include "debug_log.h"
 #include "ui.h"
 
 #include <3ds.h>
@@ -257,10 +258,21 @@ void screen_detail_init(void) {
     LightEvent_Init(&s_cover_event, RESET_ONESHOT);
     LightEvent_Init(&s_cv_wake, RESET_ONESHOT);
 
-    s_cover_worker = threadCreate(cover_worker, NULL, 48 * 1024, 0x30, 1, false);
+    s_cover_worker = threadCreate(cover_worker, NULL, 48 * 1024, 0x30, -1, false);
+    if (!s_cover_worker) {
+        dlog("[ERR] detail: threadCreate failed; cover worker disabled");
+        /* UI should still function; covers just won't load. */
+    }
 
     s_detail_thread = threadCreate(detail_thread, NULL,
-                                    32 * 1024, 0x30, 1, false);
+                                    32 * 1024, 0x30, -1, false);
+    if (!s_detail_thread) {
+        dlog("[ERR] detail: threadCreate failed; cannot fetch chapter list");
+        s_detail_done = true;
+        s_loading = false;
+        s_error = true;
+        snprintf(s_error_msg, sizeof(s_error_msg), "Failed to load chapters");
+    }
 }
 
 void screen_detail_fini(void) {

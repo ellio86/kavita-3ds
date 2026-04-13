@@ -114,6 +114,7 @@ screen_libraries.o: \
  C:/devkitPro/libctru/include/c2d/text.h \
  C:/devkitPro/libctru/include/c2d/font.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h \
+ C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h \
  C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/screen_libraries.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/app.h:
@@ -229,4 +230,5 @@ C:/devkitPro/libctru/include/c2d/sprite.h:
 C:/devkitPro/libctru/include/c2d/text.h:
 C:/devkitPro/libctru/include/c2d/font.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/kavita_api.h:
+C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/debug_log.h:
 C:/Users/ellio/source/repos/ellio86/kavita-3ds/include/ui.h:

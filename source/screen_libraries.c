@@ -1,6 +1,7 @@
 #include "screen_libraries.h"
 #include "app.h"
 #include "kavita_api.h"
+#include "debug_log.h"
 #include "ui.h"
 
 #include <3ds.h>
@@ -49,7 +50,14 @@ void screen_libraries_init(void) {
     s_thread_done = false;
     s_spinner.angle = 0.0f;
 
-    s_thread = threadCreate(fetch_thread, NULL, 32 * 1024, 0x30, 1, false);
+    s_thread = threadCreate(fetch_thread, NULL, 32 * 1024, 0x30, -1, false);
+    if (!s_thread) {
+        dlog("[ERR] libraries: threadCreate failed; cannot start fetch thread");
+        s_thread_done = true;
+        s_loading = false;
+        s_error = true;
+        snprintf(s_error_msg, sizeof(s_error_msg), "Failed to load libraries");
+    }
 }
 
 void screen_libraries_fini(void) {
